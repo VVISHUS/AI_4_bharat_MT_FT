@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -121,6 +123,36 @@ class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
         shifted.masked_fill_(shifted == -100, self.label_pad_id)
         batch["decoder_input_ids"] = shifted
         return batch
+
+
+class NoEvalSeq2SeqTrainer(Seq2SeqTrainer):
+    """A Trainer that refuses to evaluate, loudly.
+
+    `eval_during_training` was silently re-enabled twice during development, and
+    each time the symptom was only "the run is slow" -- which is indistinguishable
+    from a dozen other causes and took hours to attribute. With the KV cache
+    disabled (which both IndicTrans2 checkpoints force on us) a single
+    generation-based eval pass over 1000 samples takes ~50 minutes.
+
+    Rather than trust configuration, this makes the failure impossible to miss:
+    if anything enters an eval loop while eval is meant to be off, the run dies
+    with a traceback that names the caller.
+    """
+
+    def evaluate(self, *args, **kwargs):
+        raise RuntimeError(
+            "evaluate() was called even though eval_during_training=false. "
+            "The traceback above names the caller. This path should be "
+            "unreachable: eval_strategy is NO, do_eval is False and eval_dataset "
+            "is None. If you see this, the running process is NOT using the "
+            "current config -- check for a stale process with: "
+            "ps aux | grep '[s]rc.train'"
+        )
+
+    def evaluation_loop(self, *args, **kwargs):
+        raise RuntimeError(
+            "evaluation_loop() entered although eval is disabled. See evaluate()."
+        )
 
 
 def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrainingArguments:
@@ -225,6 +257,16 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config, args.overrides)
     set_seed(cfg["seed"])
 
+    # Printed so a running process can be matched against `ps aux`. A
+    # `git reset --hard` updates files on disk but cannot change the config an
+    # already-running process read minutes ago.
+    LOGGER.info(
+        "PID=%s | started=%s | config=%s",
+        os.getpid(),
+        datetime.now().isoformat(timespec="seconds"),
+        Path(args.config).resolve(),
+    )
+
     output_dir = Path(cfg["training"]["output_dir"])
     if args.smoke:
         output_dir = output_dir.with_name(output_dir.name + "-smoke")
@@ -316,7 +358,12 @@ def main(argv: list[str] | None = None) -> int:
         "EVAL DURING TRAINING IS %s",
         "OFF -- pure training run" if "no" in eval_strategy else "ON (this is the slow path)",
     )
-    trainer = Seq2SeqTrainer(
+    # Pick the Trainer that matches the intent, so a mismatch cannot be quiet.
+    eval_enabled = not args.smoke and cfg["training"].get("eval_during_training", False)
+    trainer_cls = Seq2SeqTrainer if eval_enabled else NoEvalSeq2SeqTrainer
+    LOGGER.info("trainer class: %s", trainer_cls.__name__)
+
+    trainer = trainer_cls(
         model=model,
         args=training_args,
         train_dataset=train_ds,
