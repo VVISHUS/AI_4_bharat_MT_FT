@@ -125,6 +125,39 @@ class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
         return batch
 
 
+def read_eval_strategy(training_args) -> str:
+    """Return the eval strategy as a string, whatever transformers calls it.
+
+    `evaluation_strategy` was renamed `eval_strategy`, and the value is an
+    IntervalStrategy enum whose str() is e.g. "IntervalStrategy.NO".
+    """
+    value = getattr(training_args, "eval_strategy", None)
+    if value is None:
+        value = getattr(training_args, "evaluation_strategy", "no")
+    return str(value)
+
+
+def eval_is_disabled(training_args) -> bool:
+    """True when no evaluation loop will run.
+
+    Deliberately a named, tested function rather than an inline check. The
+    previous inline version was `"no" in str(strategy)`, which is False for
+    "IntervalStrategy.NO" because of case -- so the log claimed eval was ON
+    during runs where it was correctly OFF, and sent us chasing a phantom for
+    hours. Compare the enum's final component, case-insensitively.
+    """
+    tail = read_eval_strategy(training_args).rsplit(".", 1)[-1].strip().upper()
+    return tail == "NO" and not getattr(training_args, "do_eval", False)
+
+
+def describe_eval_state(training_args) -> str:
+    return (
+        "OFF -- pure training run"
+        if eval_is_disabled(training_args)
+        else "ON (this is the slow path)"
+    )
+
+
 class NoEvalSeq2SeqTrainer(Seq2SeqTrainer):
     """A Trainer that refuses to evaluate, loudly.
 
@@ -343,21 +376,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     training_args = build_training_args(cfg, output_dir, args.smoke)
-    # `evaluation_strategy` was renamed `eval_strategy`; read whichever exists.
-    eval_strategy = str(
-        getattr(training_args, "eval_strategy", None)
-        or getattr(training_args, "evaluation_strategy", "no")
-    )
+    eval_strategy = read_eval_strategy(training_args)
     LOGGER.info(
         "effective eval settings -> strategy=%s predict_with_generate=%s beams=%s",
         eval_strategy,
         training_args.predict_with_generate,
         training_args.generation_num_beams,
     )
-    LOGGER.info(
-        "EVAL DURING TRAINING IS %s",
-        "OFF -- pure training run" if "no" in eval_strategy else "ON (this is the slow path)",
-    )
+    LOGGER.info("EVAL DURING TRAINING IS %s", describe_eval_state(training_args))
     # Pick the Trainer that matches the intent, so a mismatch cannot be quiet.
     eval_enabled = not args.smoke and cfg["training"].get("eval_during_training", False)
     trainer_cls = Seq2SeqTrainer if eval_enabled else NoEvalSeq2SeqTrainer

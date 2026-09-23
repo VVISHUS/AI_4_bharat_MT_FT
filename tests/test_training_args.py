@@ -35,7 +35,11 @@ if "datasets" not in sys.modules:
     sys.modules["datasets"] = _stub
 
 from src.config import load_config  # noqa: E402
-from src.train import build_training_args  # noqa: E402
+from src.train import (  # noqa: E402
+    build_training_args,
+    describe_eval_state,
+    eval_is_disabled,
+)
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "finetune_en_mr.yaml"
 
@@ -96,6 +100,29 @@ def test_smoke_mode_never_evaluates():
     _, args = _args(smoke=True)
     assert "NO" in _strategy(args)
     assert args.predict_with_generate is False
+
+
+def test_eval_state_reported_correctly_when_off():
+    """Regression: the reporting logic once inverted its own answer.
+
+    The original check was `"no" in str(strategy)`, which is False for
+    "IntervalStrategy.NO" because of case. The log then announced eval was ON
+    during runs where it was correctly OFF.
+    """
+    _, args = _args(["training.eval_during_training=false"])
+    assert "NO" in _strategy(args), "precondition: eval really is off"
+    assert eval_is_disabled(args) is True
+    assert "OFF" in describe_eval_state(args)
+    assert "ON" not in describe_eval_state(args).replace("-- pure", "")
+
+
+def test_eval_state_reported_correctly_when_on():
+    _, args = _args([
+        "training.eval_during_training=true",
+        "training.predict_with_generate=false",
+    ])
+    assert eval_is_disabled(args) is False
+    assert describe_eval_state(args).startswith("ON")
 
 
 def test_precision_flags_are_mutually_exclusive():
