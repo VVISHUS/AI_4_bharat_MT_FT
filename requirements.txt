@@ -1,0 +1,17 @@
+# Core stack. Pinned loosely: IndicTrans2's remote code is sensitive to very new
+# transformers releases, so we cap the upper bound rather than tracking latest.
+torch>=2.1
+transformers>=4.40,<4.57
+datasets>=2.18
+accelerate>=0.30
+sentencepiece
+sacrebleu>=2.4
+peft>=0.11
+pyyaml
+pandas
+
+# IndicTrans2 preprocessing (script normalisation + language tags).
+# Not on PyPI under this name -- install from source:
+#   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
+# Needs a C build step, so it wants Python <=3.12. This is one of the reasons
+# we train on Colab/Kaggle (3.11) rather than a local 3.13 environment.

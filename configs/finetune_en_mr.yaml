@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# Fine-tune rotary-IndicTrans2-dist-200M on English -> Marathi (Samanantar).
+# Everything tunable lives here so that train.py never needs editing to run a
+# different experiment. Override any leaf from the CLI: --set training.lr=3e-5
+# ---------------------------------------------------------------------------
+
+seed: 42
+
+model:
+  name: prajdabre/rotary-indictrans2-en-indic-dist-200M
+  # Both tokenizer and model ship custom code on the Hub; without this the
+  # load fails outright (the architecture is not in transformers upstream).
+  trust_remote_code: true
+  # bf16 on Ampere+ (T4 does NOT support bf16 -> falls back to fp16 in train.py)
+  dtype: auto
+
+data:
+  dataset: ai4bharat/samanantar
+  config: mr
+  # IndicTrans2 language tags. Samanantar `src` is English, `tgt` is Marathi,
+  # which matches the en-indic direction of this checkpoint exactly.
+  src_lang: eng_Latn
+  tgt_lang: mar_Deva
+  src_column: src
+  tgt_column: tgt
+
+  # Samanantar-mr is 3.63M mined pairs. We deliberately subset: the assignment
+  # is graded on the pipeline working end-to-end, not on corpus size, and a
+  # 120k-pair run finishes inside one Colab session. Raise this if you have
+  # the budget -- nothing else in the pipeline needs to change.
+  max_train_samples: 120000
+  # Held out from the SAME distribution, purely to watch for overfitting.
+  # Real quality reporting happens on IN22-Gen in evaluate.py.
+  valid_samples: 1000
+  # Streaming avoids pulling all 3.63M rows before subsetting. Set false if
+  # you want a cached local copy for repeated runs.
+  streaming: true
+  # Pull this many raw rows before filtering, to still land near
+  # max_train_samples once the filters have taken their cut.
+  raw_pool_multiplier: 1.6
+
+  max_source_length: 128
+  max_target_length: 128
+
+  # Every filter below reports how many pairs it dropped, and the table is
+  # written to outputs/<run>/filter_report.md. Samanantar is bitext-mined and
+  # therefore noisy; showing the funnel is the point.
+  filters:
+    min_words: 3           # kill fragments / headers
+    max_words: 80          # kill runaway rows that blow up padding
+    max_word_ratio: 2.5    # |src|/|tgt| sanity -- catches misalignment
+    min_devanagari_ratio: 0.55  # target must actually be Marathi script
+    drop_copies: true      # src == tgt means the miner failed
+    dedup: true            # exact (src, tgt) duplicates
+    dedup_on_source: true  # Samanantar has many tgt per src; keep one
+
+peft:
+  # LoRA keeps optimiser state tiny (~1% of params) so this run fits a free
+  # T4 with room for a real batch size. Set enabled:false to full-fine-tune,
+  # which also fits at 16GB but leaves less headroom for sequence length.
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  # Attention + FFN projections. Names are resolved defensively in train.py
+  # because the rotary variant renames some modules vs. vanilla IndicTrans2.
+  target_modules: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]
+
+training:
+  output_dir: outputs/rotary-it2-en-mr
+  num_train_epochs: 1
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2      # effective batch 32
+  learning_rate: 1.0e-4               # LoRA tolerates ~10x the full-FT LR
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  lr_scheduler_type: cosine
+  label_smoothing_factor: 0.1         # standard for NMT; reduces overconfidence
+  max_grad_norm: 1.0
+  logging_steps: 50
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 2
+  predict_with_generate: true
+  generation_num_beams: 5
+  generation_max_length: 128
+  group_by_length: true               # big throughput win on variable-length MT
+  gradient_checkpointing: false       # turn on only if you OOM
+  report_to: none
+
+evaluation:
+  # AI4Bharat's own benchmark -- more on-ecosystem than FLORES, and this model
+  # family was not tuned on it. VERIFY the config name on the Hub before the
+  # run; evaluate.py falls back to FLORES if the load fails.
+  dataset: ai4bharat/IN22-Gen
+  dataset_config: eng_Latn-mar_Deva
+  split: test
+  fallback_dataset: facebook/flores
+  fallback_config: eng_Latn-mar_Deva
+  fallback_split: devtest
+  max_eval_samples: 500
+  num_beams: 5
+  max_length: 256
+  # chrF++ is the primary metric: BLEU is unreliable for morphologically rich
+  # Indic targets with a single reference. We report both.
+  metrics: [chrf, bleu]
+  num_qualitative_samples: 15
