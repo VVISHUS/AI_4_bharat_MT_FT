@@ -120,13 +120,15 @@ training:
   # Real quality is measured once, properly, on the held-out IN22-Gen benchmark
   # via evaluate.py. Set this to true only if you specifically want a mid-run
   # curve, and expect the run to take substantially longer.
-  # Back ON, but loss-only (predict_with_generate stays false below). One
-  # forward pass per batch takes seconds and gives a validation curve for the
-  # README. Generation-based eval is still not worth it here: the validation
-  # split is held-out rows of the same MINED corpus, so scoring well on it
-  # largely means fitting the miner's noise. Real quality is measured once on
-  # IN22-Gen in evaluate.py.
-  eval_during_training: true
+  # OFF. Turned back on briefly on the assumption the KV cache would work on
+  # the official checkpoint; it does not (see model.use_cache), so this reverts.
+  #
+  # It buys little regardless: the validation split is held-out rows of the same
+  # MINED corpus we train on, so a better score there largely means fitting the
+  # miner's noise. Real quality is measured once on the held-out, human-curated
+  # IN22-Gen benchmark in evaluate.py. The training loss curve for the README
+  # comes from trainer_state.json either way.
+  eval_during_training: false
   eval_steps: 500
   save_steps: 500
   save_total_limit: 2
