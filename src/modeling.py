@@ -38,6 +38,29 @@ def load_tokenizer(model_cfg: dict):
     )
 
 
+def disable_kv_cache(model):
+    """Turn off the KV cache, working around stale remote modeling code.
+
+    This checkpoint's `modeling_rotary_indictrans.py` was written against the
+    pre-4.43 transformers API, where `generate()` passed `past_key_values=None`
+    on the first decoding step. Modern transformers passes an *empty*
+    `EncoderDecoderCache` instead, so the remote code's
+
+        past_key_values[0][0].shape[2] if past_key_values is not None else 0
+
+    takes the wrong branch and dies on `NoneType.shape`.
+
+    Disabling the cache sidesteps the branch entirely: decoding recomputes the
+    full prefix each step. That is slower (roughly quadratic rather than linear
+    in output length) but numerically identical. Training is unaffected either
+    way -- teacher forcing never uses the cache.
+    """
+    model.config.use_cache = False
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.use_cache = False
+    return model
+
+
 def load_model(model_cfg: dict, dtype: torch.dtype | None = None):
     """Load the seq2seq model.
 
@@ -49,7 +72,13 @@ def load_model(model_cfg: dict, dtype: torch.dtype | None = None):
     kwargs = {"trust_remote_code": model_cfg.get("trust_remote_code", True)}
     if dtype is not None:
         kwargs["torch_dtype"] = dtype
-    return AutoModelForSeq2SeqLM.from_pretrained(model_cfg["name"], **kwargs)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_cfg["name"], **kwargs)
+
+    # Default to off: this checkpoint's remote code predates the Cache API.
+    # See disable_kv_cache() for the full explanation.
+    if not model_cfg.get("use_cache", False):
+        model = disable_kv_cache(model)
+    return model
 
 
 def resolve_lora_targets(model, requested: list[str]) -> list[str]:

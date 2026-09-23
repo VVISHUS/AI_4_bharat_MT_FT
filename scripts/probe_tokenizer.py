@@ -48,6 +48,9 @@ def main() -> int:
     rule(f"1. Loading {MODEL} on {device}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     model = AutoModelForSeq2SeqLM.from_pretrained(MODEL, trust_remote_code=True).to(device).eval()
+    model.config.use_cache = False
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.use_cache = False
     processor = IndicProcessor(inference=True)
     print(f"tokenizer class : {type(tokenizer).__name__}")
     print(f"model class     : {type(model).__name__}")
@@ -64,7 +67,12 @@ def main() -> int:
 
     encoded = tokenizer(prepared, return_tensors="pt", padding=True, truncation=True).to(device)
     with torch.inference_mode():
-        generated = model.generate(**encoded, num_beams=5, max_length=128, early_stopping=True)
+        generated = model.generate(
+            **encoded, num_beams=5, max_length=128, early_stopping=True,
+            # This checkpoint's remote code predates the transformers Cache
+            # API and crashes with it enabled. See modeling.disable_kv_cache().
+            use_cache=False,
+        )
     decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
     final = processor.postprocess_batch(decoded, lang=TGT_LANG)
     for src, out in zip(EN_SAMPLES, final):

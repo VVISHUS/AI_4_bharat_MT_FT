@@ -110,6 +110,8 @@ def translate(
             # Greedy-ish length control: MT wants no repetition penalty games,
             # just beams. Keep this identical between base and tuned.
             early_stopping=True,
+            # Required for this checkpoint -- see modeling.disable_kv_cache().
+            use_cache=False,
         )
         decoded = decode_targets(tokenizer, generated, strategy)
         # postprocess_batch restores entities/numerals the processor masked.

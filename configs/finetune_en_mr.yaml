@@ -13,6 +13,12 @@ model:
   trust_remote_code: true
   # bf16 on Ampere+ (T4 does NOT support bf16 -> falls back to fp16 in train.py)
   dtype: auto
+  # This checkpoint's remote modeling code predates the transformers Cache API
+  # (it expects past_key_values to be None or a legacy tuple). Modern
+  # transformers passes an empty EncoderDecoderCache, which crashes it during
+  # generation. Leaving the cache off avoids that code path entirely; decoding
+  # is slower but identical. Training never uses the cache.
+  use_cache: false
 
 data:
   dataset: ai4bharat/samanantar

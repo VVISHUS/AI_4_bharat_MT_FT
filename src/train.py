@@ -211,9 +211,10 @@ def main(argv: list[str] | None = None) -> int:
     trainable, total = count_parameters(model)
     LOGGER.info("trainable %s / %s params (%.2f%%)", f"{trainable:,}", f"{total:,}", 100 * trainable / total)
 
-    if cfg["training"]["gradient_checkpointing"]:
-        # Incompatible with the KV cache; the Trainer warns but does not fix it.
-        model.config.use_cache = False
+    # Cache stays off throughout: training never uses it (teacher forcing), and
+    # this checkpoint's remote code cannot handle the modern Cache objects that
+    # `predict_with_generate` evaluation would otherwise create.
+    model.config.use_cache = False
 
     collator = DataCollatorForSeq2Seq(
         tokenizer,
