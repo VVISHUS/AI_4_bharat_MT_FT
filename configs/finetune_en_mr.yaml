@@ -88,7 +88,13 @@ training:
   eval_steps: 500
   save_steps: 500
   save_total_limit: 2
-  predict_with_generate: true
+  # Generation-based eval DURING training is off. It interacts badly with the
+  # disabled KV cache this checkpoint forces on us: decoding becomes quadratic
+  # in output length, and with 5 beams over 1000 samples a single evaluation
+  # took ~50 minutes -- 7 of those would add ~6h to a 52min training run.
+  # We evaluate on loss here (one forward pass, seconds) and measure real
+  # translation quality once, properly, on IN22-Gen in evaluate.py.
+  predict_with_generate: false
   generation_num_beams: 5
   generation_max_length: 128
   group_by_length: true               # big throughput win on variable-length MT
@@ -106,7 +112,11 @@ evaluation:
   fallback_config: eng_Latn-mar_Deva
   fallback_split: devtest
   max_eval_samples: 500
-  num_beams: 5
+  # Greedy rather than beam search: with the KV cache disabled, beam=5 costs
+  # ~5x more for a modest quality gain. Base and fine-tuned use the IDENTICAL
+  # setting, so the comparison stays fair -- only the absolute scores shift
+  # slightly versus what beam search would give.
+  num_beams: 1
   max_length: 256
   # chrF++ is the primary metric: BLEU is unreliable for morphologically rich
   # Indic targets with a single reference. We report both.

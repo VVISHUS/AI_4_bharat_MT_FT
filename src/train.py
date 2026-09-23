@@ -176,14 +176,18 @@ def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrai
             predict_with_generate=False,
         )
     else:
+        # Which metric identifies the best checkpoint depends on whether we
+        # generate during eval. With predict_with_generate=False there is no
+        # chrF++ to rank on, only the loss -- and lower is better there.
+        best_metric = "chrf++" if tcfg["predict_with_generate"] else "eval_loss"
         kwargs.update(
             eval_strategy="steps",
             eval_steps=tcfg["eval_steps"],
             save_strategy="steps",
             save_steps=tcfg["save_steps"],
             load_best_model_at_end=True,
-            metric_for_best_model="chrf++",
-            greater_is_better=True,
+            metric_for_best_model=best_metric,
+            greater_is_better=tcfg["predict_with_generate"],
         )
 
     # `evaluation_strategy` was renamed to `eval_strategy`; support both so this
@@ -292,7 +296,14 @@ def main(argv: list[str] | None = None) -> int:
         train_dataset=train_ds,
         eval_dataset=None if args.smoke else valid_ds,
         data_collator=collator,
-        compute_metrics=None if args.smoke else build_compute_metrics(tokenizer, strategy),
+        # compute_metrics only makes sense when the eval loop actually decodes
+        # text. Without predict_with_generate the Trainer hands us logits, not
+        # token ids, and chrF++ over argmax'd logits would be meaningless.
+        compute_metrics=(
+            build_compute_metrics(tokenizer, strategy)
+            if (not args.smoke and cfg["training"]["predict_with_generate"])
+            else None
+        ),
     )
 
     LOGGER.info("Starting %s run", "SMOKE" if args.smoke else "full")
