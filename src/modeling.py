@@ -123,7 +123,25 @@ def attach_lora(model, peft_cfg: dict):
         target_modules=resolve_lora_targets(model, peft_cfg["target_modules"]),
         bias="none",
     )
-    model = get_peft_model(model, config)
+    try:
+        model = get_peft_model(model, config)
+    except ImportError as exc:
+        # PEFT's LoRA dispatcher probes for optional quantization backends and
+        # RAISES on a too-old torchao rather than treating it as unavailable.
+        # Colab preinstalls torchao 0.10 against peft's >0.16 floor, so this
+        # fires on an otherwise healthy environment. Translate it into advice.
+        if "torchao" not in str(exc):
+            raise
+        raise ImportError(
+            f"{exc}\n\n"
+            "This is an environment conflict, not a model problem. We use no "
+            "quantization, so either:\n"
+            "  pip uninstall -y torchao\n"
+            "or skip LoRA entirely -- full fine-tuning fits a 16GB GPU at this "
+            "model size:\n"
+            "  python -m src.train --set peft.enabled=false"
+        ) from exc
+
     model.print_trainable_parameters()
     return model
 

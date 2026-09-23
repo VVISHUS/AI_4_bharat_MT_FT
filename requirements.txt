@@ -15,3 +15,9 @@ pandas
 #   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
 # Needs a C build step, so it wants Python <=3.12. This is one of the reasons
 # we train on Colab/Kaggle (3.11) rather than a local 3.13 environment.
+
+# NOT a dependency, but a known conflict: Colab preinstalls torchao 0.10, while
+# peft>=0.11 requires >0.16 and raises ImportError from its LoRA dispatcher
+# rather than skipping. We use no quantization, so:
+#   pip uninstall -y torchao
+# Alternatively run with --set peft.enabled=false (full FT fits a T4 at 200M).

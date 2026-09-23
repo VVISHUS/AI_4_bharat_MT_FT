@@ -77,6 +77,52 @@ def build_compute_metrics(tokenizer, strategy: str):
     return compute_metrics
 
 
+class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
+    """Seq2seq collator that also builds `decoder_input_ids` from `labels`.
+
+    Most HF seq2seq models derive the decoder input by shifting the labels one
+    position right, either inside `forward` or via a
+    `prepare_decoder_input_ids_from_labels` method that `DataCollatorForSeq2Seq`
+    calls automatically. This checkpoint's remote modeling code does **neither**,
+    so training dies with:
+
+        ValueError: You have to specify either decoder_input_ids or
+                    decoder_inputs_embeds
+
+    Inference is unaffected because `generate()` constructs decoder inputs on
+    its own -- which is why the probe passed and training did not.
+
+    The shift is the standard fairseq/BART one:
+
+        labels            = [ y1, y2, ..., yn, </s> ]
+        decoder_input_ids = [ <start>, y1, y2, ..., yn ]
+
+    with `<start>` = `decoder_start_token_id` (2, i.e. </s>, for IndicTrans2).
+    Padding positions in `labels` carry -100 so they are excluded from the loss;
+    those must become real pad ids here, because -100 is not a valid embedding
+    index and would index-error the decoder's embedding lookup.
+    """
+
+    def __init__(self, *args, decoder_start_token_id: int, pad_token_id: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decoder_start_token_id = decoder_start_token_id
+        self.label_pad_id = pad_token_id
+
+    def __call__(self, features, return_tensors=None):
+        batch = super().__call__(features, return_tensors=return_tensors)
+        if "labels" not in batch or "decoder_input_ids" in batch:
+            return batch
+
+        labels = batch["labels"]
+        shifted = labels.new_zeros(labels.shape)
+        shifted[:, 1:] = labels[:, :-1].clone()
+        shifted[:, 0] = self.decoder_start_token_id
+        # -100 is a loss-masking sentinel, never a token. Must not reach nn.Embedding.
+        shifted.masked_fill_(shifted == -100, self.label_pad_id)
+        batch["decoder_input_ids"] = shifted
+        return batch
+
+
 def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrainingArguments:
     tcfg = cfg["training"]
     use_cuda = torch.cuda.is_available()
@@ -173,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     LOGGER.info("Loading tokenizer and model: %s", cfg["model"]["name"])
     tokenizer = load_tokenizer(cfg["model"])
     model = load_model(cfg["model"])
+    base_config = model.config  # captured before the PEFT wrap
 
     # ---- data -------------------------------------------------------------
     if args.smoke:
@@ -216,11 +263,26 @@ def main(argv: list[str] | None = None) -> int:
     # `predict_with_generate` evaluation would otherwise create.
     model.config.use_cache = False
 
-    collator = DataCollatorForSeq2Seq(
+    # Read the special ids off the *base* config: after the PEFT wrap, attribute
+    # proxying works but is easier to reason about if we capture them up front.
+    decoder_start_token_id = base_config.decoder_start_token_id
+    pad_token_id = base_config.pad_token_id
+    if decoder_start_token_id is None:
+        raise RuntimeError(
+            "decoder_start_token_id is None -- the decoder has no token to begin "
+            "from. Check what scripts/probe_tokenizer.py reported."
+        )
+    LOGGER.info(
+        "decoder_start_token_id=%s pad_token_id=%s", decoder_start_token_id, pad_token_id
+    )
+
+    collator = DataCollatorWithDecoderInputs(
         tokenizer,
         model=model,
         label_pad_token_id=-100,
         padding="longest",
+        decoder_start_token_id=decoder_start_token_id,
+        pad_token_id=pad_token_id,
     )
 
     training_args = build_training_args(cfg, output_dir, args.smoke)
