@@ -22,6 +22,13 @@ import sys
 
 import torch
 
+from pathlib import Path
+
+# Running as `python scripts/x.py` puts scripts/ on sys.path, not the repo root,
+# so `import src...` fails. Add the repo root explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
 MODEL = "prajdabre/rotary-indictrans2-en-indic-dist-200M"
 SRC_LANG, TGT_LANG = "eng_Latn", "mar_Deva"
 

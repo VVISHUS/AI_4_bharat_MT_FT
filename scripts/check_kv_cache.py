@@ -32,6 +32,13 @@ import time
 
 import torch
 
+from pathlib import Path
+
+# Running as `python scripts/x.py` puts scripts/ on sys.path, not the repo root,
+# so `import src...` fails. Add the repo root explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
 SENTENCES = [
     "The committee published its final report on Tuesday morning.",
     "She has been working on this problem for several years.",
