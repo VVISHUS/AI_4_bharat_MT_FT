@@ -25,12 +25,24 @@ model:
   trust_remote_code: true
   # bf16 on Ampere+ (T4 does NOT support bf16 -> falls back to fp16 in train.py)
   dtype: auto
-  # KV cache ON. Verify for any new checkpoint with:
+  # KV cache OFF -- measured, not assumed. Run:
   #     python scripts/check_kv_cache.py
-  # Without it, decoding recomputes the full prefix every step -- quadratic
-  # rather than linear in output length. Training is unaffected either way,
-  # since teacher forcing does one parallel pass and never decodes step by step.
-  use_cache: true
+  #
+  # BOTH the official ai4bharat checkpoint and prajdabre's rotary fork ship
+  # remote modeling code written against the pre-4.43 transformers API. With
+  # transformers 4.56 the cache cannot be enabled on either: generate() passes
+  # an empty EncoderDecoderCache and the code dies on NoneType.shape.
+  #
+  # This costs far less than feared. Measured on a T4, beam=5, cache off:
+  #     0.77s for 4 sentences  ->  ~0.19 s/sentence
+  # so a 500-sentence benchmark decodes in ~95s. Training is unaffected
+  # regardless: teacher forcing is one parallel pass and never decodes
+  # step by step.
+  #
+  # The earlier 50-minute evaluations were NOT caused by this. They were
+  # generation-based eval running during training, on a LoRA-wrapped model,
+  # over 1000 samples, seven times. That is off now (see eval_during_training).
+  use_cache: false
 
 data:
   dataset: ai4bharat/samanantar
