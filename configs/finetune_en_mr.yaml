@@ -7,18 +7,30 @@
 seed: 42
 
 model:
-  name: prajdabre/rotary-indictrans2-en-indic-dist-200M
+  # Official AI4Bharat checkpoint. Switched here from
+  #   prajdabre/rotary-indictrans2-en-indic-dist-200M
+  # after that fork proved to be unmaintained against modern transformers: its
+  # remote code predates the Cache API (generation crashes with the KV cache on)
+  # and never derives decoder_input_ids from labels (training crashes outright).
+  # Working around both was possible but left generation ~60x slower.
+  #
+  # NOTE: this repo is gated="auto" on the Hub -- accept the terms once while
+  # logged in, then provide an HF token. No manual approval wait.
+  #
+  # Secondary benefit: the rotary fork exists for DOCUMENT-level translation,
+  # while Samanantar is sentence-level. This checkpoint matches the data.
+  name: ai4bharat/indictrans2-en-indic-dist-200M
   # Both tokenizer and model ship custom code on the Hub; without this the
   # load fails outright (the architecture is not in transformers upstream).
   trust_remote_code: true
   # bf16 on Ampere+ (T4 does NOT support bf16 -> falls back to fp16 in train.py)
   dtype: auto
-  # This checkpoint's remote modeling code predates the transformers Cache API
-  # (it expects past_key_values to be None or a legacy tuple). Modern
-  # transformers passes an empty EncoderDecoderCache, which crashes it during
-  # generation. Leaving the cache off avoids that code path entirely; decoding
-  # is slower but identical. Training never uses the cache.
-  use_cache: false
+  # KV cache ON. Verify for any new checkpoint with:
+  #     python scripts/check_kv_cache.py
+  # Without it, decoding recomputes the full prefix every step -- quadratic
+  # rather than linear in output length. Training is unaffected either way,
+  # since teacher forcing does one parallel pass and never decodes step by step.
+  use_cache: true
 
 data:
   dataset: ai4bharat/samanantar
@@ -96,7 +108,13 @@ training:
   # Real quality is measured once, properly, on the held-out IN22-Gen benchmark
   # via evaluate.py. Set this to true only if you specifically want a mid-run
   # curve, and expect the run to take substantially longer.
-  eval_during_training: false
+  # Back ON, but loss-only (predict_with_generate stays false below). One
+  # forward pass per batch takes seconds and gives a validation curve for the
+  # README. Generation-based eval is still not worth it here: the validation
+  # split is held-out rows of the same MINED corpus, so scoring well on it
+  # largely means fitting the miner's noise. Real quality is measured once on
+  # IN22-Gen in evaluate.py.
+  eval_during_training: true
   eval_steps: 500
   save_steps: 500
   save_total_limit: 2
@@ -124,11 +142,9 @@ evaluation:
   fallback_config: eng_Latn-mar_Deva
   fallback_split: devtest
   max_eval_samples: 500
-  # Greedy rather than beam search: with the KV cache disabled, beam=5 costs
-  # ~5x more for a modest quality gain. Base and fine-tuned use the IDENTICAL
-  # setting, so the comparison stays fair -- only the absolute scores shift
-  # slightly versus what beam search would give.
-  num_beams: 1
+  # Beam search restored now that the cache works. Base and fine-tuned use the
+  # IDENTICAL setting, so the comparison isolates the weights.
+  num_beams: 5
   max_length: 256
   # chrF++ is the primary metric: BLEU is unreliable for morphologically rich
   # Indic targets with a single reference. We report both.
