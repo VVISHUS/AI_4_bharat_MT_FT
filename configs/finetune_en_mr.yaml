@@ -85,6 +85,18 @@ training:
   label_smoothing_factor: 0.1         # standard for NMT; reduces overconfidence
   max_grad_norm: 1.0
   logging_steps: 50
+  # Evaluation during training is OFF by default.
+  #
+  # It buys almost nothing here: the validation split is held-out rows of the
+  # same MINED corpus we train on, so a better number on it mostly means we fit
+  # the miner's noise better. Meanwhile it is the single most expensive thing in
+  # the run, because this checkpoint forces the KV cache off and any decoding
+  # becomes quadratic in output length.
+  #
+  # Real quality is measured once, properly, on the held-out IN22-Gen benchmark
+  # via evaluate.py. Set this to true only if you specifically want a mid-run
+  # curve, and expect the run to take substantially longer.
+  eval_during_training: false
   eval_steps: 500
   save_steps: 500
   save_total_limit: 2

@@ -175,6 +175,17 @@ def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrai
             group_by_length=False,
             predict_with_generate=False,
         )
+    elif not tcfg.get("eval_during_training", False):
+        # No eval loop at all: just train and checkpoint. Fastest, and the
+        # default -- see the config comment for why in-domain eval is not worth
+        # its cost here.
+        kwargs.update(
+            eval_strategy="no",
+            save_strategy="steps",
+            save_steps=tcfg["save_steps"],
+            load_best_model_at_end=False,
+            predict_with_generate=False,
+        )
     else:
         # Which metric identifies the best checkpoint depends on whether we
         # generate during eval. With predict_with_generate=False there is no
@@ -290,11 +301,30 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     training_args = build_training_args(cfg, output_dir, args.smoke)
+    # `evaluation_strategy` was renamed `eval_strategy`; read whichever exists.
+    eval_strategy = str(
+        getattr(training_args, "eval_strategy", None)
+        or getattr(training_args, "evaluation_strategy", "no")
+    )
+    LOGGER.info(
+        "effective eval settings -> strategy=%s predict_with_generate=%s beams=%s",
+        eval_strategy,
+        training_args.predict_with_generate,
+        training_args.generation_num_beams,
+    )
+    LOGGER.info(
+        "EVAL DURING TRAINING IS %s",
+        "OFF -- pure training run" if "no" in eval_strategy else "ON (this is the slow path)",
+    )
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=None if args.smoke else valid_ds,
+        eval_dataset=(
+            valid_ds
+            if (not args.smoke and cfg["training"].get("eval_during_training", False))
+            else None
+        ),
         data_collator=collator,
         # compute_metrics only makes sense when the eval loop actually decodes
         # text. Without predict_with_generate the Trainer hands us logits, not
