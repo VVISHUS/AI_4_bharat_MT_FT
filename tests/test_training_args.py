@@ -39,6 +39,7 @@ from src.train import (  # noqa: E402
     build_training_args,
     describe_eval_state,
     eval_is_disabled,
+    label_smoothing_floor,
 )
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "finetune_en_mr.yaml"
@@ -123,6 +124,35 @@ def test_eval_state_reported_correctly_when_on():
     ])
     assert eval_is_disabled(args) is False
     assert describe_eval_state(args).startswith("ON")
+
+
+def test_label_smoothing_floor_is_positive_and_matches_theory():
+    """Regression: the smoke threshold was once set below this floor.
+
+    With label_smoothing=0.1 over a 32322-token vocab the loss cannot go below
+    ~1.363, so asserting "loss < 1.0" reported a correct pipeline as broken.
+    """
+    floor = label_smoothing_floor(32322, 0.1)
+    assert 1.35 < floor < 1.38, f"expected ~1.363, got {floor}"
+    assert label_smoothing_floor(32322, 0.0) == 0.0
+    # Smaller vocab -> lower floor, since the smoothed mass is spread less thinly.
+    assert label_smoothing_floor(1000, 0.1) < floor
+
+
+def test_smoke_mode_removes_the_loss_floor():
+    """Smoke mode must disable smoothing, or 'did it memorise?' is unanswerable."""
+    _, args = _args(smoke=True)
+    assert args.label_smoothing_factor == 0.0, (
+        "smoke mode kept label smoothing, which floors the loss near 1.36 and "
+        "makes the overfit check meaningless"
+    )
+
+
+def test_full_config_keeps_label_smoothing():
+    """The real run should still smooth -- it is standard for NMT."""
+    cfg, args = _args()
+    assert args.label_smoothing_factor == 0.1
+    assert cfg["training"]["label_smoothing_factor"] == 0.1
 
 
 def test_precision_flags_are_mutually_exclusive():

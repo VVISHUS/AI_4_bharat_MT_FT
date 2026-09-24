@@ -125,6 +125,29 @@ class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
         return batch
 
 
+def label_smoothing_floor(vocab_size: int, epsilon: float) -> float:
+    """Minimum achievable cross-entropy under label smoothing.
+
+    With smoothing, the target is not one-hot: it puts (1-e+e/V) on the correct
+    token and e/V on every other. A perfect model therefore still incurs the
+    entropy of that smoothed target. For V=32322 and e=0.1 the floor is ~1.36,
+    so any smoke test asserting "loss must approach zero" is unsatisfiable.
+
+    This function exists because that exact mistake cost a debugging cycle: the
+    threshold was set to 1.0, below a floor of 1.363, and the test reported a
+    correct pipeline as broken.
+    """
+    import math
+
+    if epsilon <= 0:
+        return 0.0
+    p_correct = 1.0 - epsilon + epsilon / vocab_size
+    p_other = epsilon / vocab_size
+    nll = -math.log(p_correct)
+    smoothed = -(math.log(p_correct) + (vocab_size - 1) * math.log(p_other)) / vocab_size
+    return (1.0 - epsilon) * nll + epsilon * smoothed
+
+
 def read_eval_strategy(training_args) -> str:
     """Return the eval strategy as a string, whatever transformers calls it.
 
@@ -235,6 +258,9 @@ def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrai
             learning_rate=1e-4,
             warmup_ratio=0.0,
             logging_steps=5,
+            # No label smoothing in smoke mode. Smoothing floors the loss near
+            # 1.36 for this vocab, which makes "did it memorise?" unanswerable.
+            label_smoothing_factor=0.0,
             save_strategy="no",
             eval_strategy="no",
             group_by_length=False,
@@ -316,6 +342,13 @@ def main(argv: list[str] | None = None) -> int:
         # Deliberately tiny, and NOT deduped against itself: we want the model
         # to memorise these 32 pairs.
         cfg["data"] = {**cfg["data"], "max_train_samples": 32, "valid_samples": 8}
+        # Full fine-tuning for the smoke test. Memorising a handful of examples
+        # is a full-FT capability; LoRA at r=16 updates 2.97% of the weights and
+        # cannot do it, so a LoRA smoke test measures the adapter's capacity
+        # rather than whether the label pipeline is wired correctly.
+        if cfg["peft"]["enabled"]:
+            LOGGER.info("smoke mode: disabling LoRA so memorisation is possible")
+            cfg["peft"] = {**cfg["peft"], "enabled": False}
 
     processor = ProcessorAdapter(inference=False)
     train_ds, valid_ds, report, strategy = build_datasets(
@@ -414,11 +447,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.smoke:
         final_loss = result.training_loss
+        smoothing = training_args.label_smoothing_factor
+        floor = label_smoothing_floor(len(tokenizer), smoothing) if smoothing else 0.0
+        threshold = floor + 0.5
+
         LOGGER.info("Smoke run final training loss: %.4f", final_loss)
-        if final_loss > 1.0:
+        LOGGER.info(
+            "label_smoothing=%.2f -> theoretical floor %.3f; pass threshold %.3f",
+            smoothing,
+            floor,
+            threshold,
+        )
+        if final_loss > threshold:
             LOGGER.error(
-                "Loss did not collapse on 32 examples. The label pipeline is "
-                "almost certainly wrong -- do NOT start the full run."
+                "Loss did not collapse on 32 examples (%.3f > %.3f). Check, in "
+                "order: (1) labels encoded with the TARGET vocabulary, "
+                "(2) decoder_input_ids present and shifted, (3) label padding "
+                "masked to -100. Do NOT start the full run.",
+                final_loss,
+                threshold,
             )
             return 1
         LOGGER.info("Smoke test PASSED: gradients reach the target text.")
