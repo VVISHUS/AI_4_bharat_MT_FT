@@ -2,7 +2,7 @@
 
 LoRA fine-tuning of [`ai4bharat/indictrans2-en-indic-dist-200M`](https://huggingface.co/ai4bharat/indictrans2-en-indic-dist-200M)
 on [`ai4bharat/samanantar`](https://huggingface.co/datasets/ai4bharat/samanantar) (`mr`),
-with held-out evaluation on IN22-Gen.
+scored on FLORES-200 and on a held-out slice of the training corpus.
 
 A plain-language account of the decisions, the problems hit along the way, and
 what I would change is in [APPROACH.md](APPROACH.md).
@@ -14,7 +14,7 @@ what I would change is in [APPROACH.md](APPROACH.md).
 ```bash
 pip install -r requirements.txt
 pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
-export HF_TOKEN=...        # the checkpoint and IN22-Gen are both gated (auto-approve)
+export HF_TOKEN=...        # the checkpoint and FLORES are both gated (auto-approve)
 
 # 1. confirm how the tokenizer encodes target-side text
 python scripts/probe_tokenizer.py
@@ -148,18 +148,33 @@ the weights.
 | Fine-tuned | 48.72 | 13.44 |
 | Δ | −2.00 | −1.71 |
 
-**Held-out Samanantar** — 1,000 pairs split off before training and never seen:
+**Held-out Samanantar** — split off before training and never seen:
 
 | Model | chrF++ | BLEU |
 | --- | ---: | ---: |
 | Base | 38.70 | 7.78 |
-| Fine-tuned | | |
+| Fine-tuned | **39.21** | **8.48** |
+| Δ | +0.51 | +0.70 |
 
-The baseline gap between the two benchmarks is itself informative: the same
+Two things fall out of this pair of tables.
+
+First, the signs are opposite. Fine-tuning moved the in-domain score up and the
+out-of-domain score down. That is the signature of fitting the corpus rather than
+improving the translation: the adapter learned something real about Samanantar,
+and what it learned does not transfer. Had I only reported the in-domain number
+this would read as a successful fine-tune.
+
+Second, the magnitudes are lopsided — +0.51 in domain against −2.00 out of it.
+The model gave up four times as much general quality as it gained on the corpus
+it was trained on, so this is not even a favourable trade for someone who only
+cares about Samanantar-like text.
+
+The baseline gap between the two benchmarks is worth noting separately: the same
 untouched model scores **12 points lower** against Samanantar references than
 against FLORES. That is a statement about the references, not the model — mined
 web text disagrees with correct translations often enough to depress the score.
-It is direct evidence that the training corpus is noisier than the benchmark.
+It is direct evidence that the training corpus is noisier than the benchmark,
+which is the same fact the opposite-signed deltas are pointing at.
 
 ---
 
@@ -191,7 +206,9 @@ A flat curve is the expected shape for this combination, not a defect. The
 regression follows from it directly: with little to gain in-distribution, the
 2.97% of weights that did move specialised toward a mined corpus with a
 measurable misalignment rate, and that specialisation costs accuracy on clean
-out-of-domain text.
+out-of-domain text. The two evaluation tables above are what that sentence looks
+like when measured — the in-domain score goes up, the out-of-domain score goes
+down, and the second effect is the larger of the two.
 
 For a run with real headroom the corpus would need to sit outside BPCC:
 **Bhili** or another genuinely low-resource language, or a Marathi domain the
@@ -260,17 +277,3 @@ the per-pair config names on its card may not resolve, and its split is `gen`
 rather than `test`. FLORES is gated and cannot serve as a silent fallback. The
 loader tries a list of candidate shapes and reports which succeeded.
 
----
-
-## Possible extensions
-
-- **A corpus outside BPCC** — Bhili, or a Marathi domain the base model handles
-  poorly. The flat loss curve above is a direct consequence of this choice, and
-  it is the single change that would most alter the outcome.
-- **Full BPCC** rather than a 121k subset, with quality-based filtering (LaBSE
-  cosine) in addition to the structural heuristics here.
-- **LoRA vs. full fine-tuning** as a controlled comparison at equal step count.
-- **Human evaluation** on a sample; chrF++ is a cheap proxy for a
-  morphologically rich target.
-- **Per-domain breakdown** of IN22-Gen, to see where the fine-tune helps and
-  where it regresses, rather than one aggregate.

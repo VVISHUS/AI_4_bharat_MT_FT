@@ -302,6 +302,19 @@ between the two numbers** is the interesting part: if the in-house number
 improves while the independent one doesn't, that tells you exactly what the model
 actually learned.
 
+That is exactly what happened. On the held-out Samanantar sentences the
+fine-tuned model scores slightly *better* than the one I started with (39.21
+against 38.70), while on FLORES it scores clearly *worse* (48.72 against 50.72).
+Same model, same decoding settings, opposite conclusions depending on which
+sentences you ask it about.
+
+This is the part of the project I'm most glad I set up in advance. If I had only
+measured the in-house number I would have reported a small improvement and
+believed it. The independent benchmark is what turns "it got a bit better" into
+the more accurate "it learned the quirks of one scrape at the cost of general
+quality" — and the trade isn't even close to worthwhile, since it gave up about
+four times as much on FLORES as it gained on Samanantar.
+
 The main measure is **chrF++**, which compares translations at the level of
 character sequences. This matters for Marathi, where words change form heavily
 depending on their grammatical role. A word-matching measure like BLEU marks a
@@ -353,7 +366,8 @@ tricky parts before spending money on them, trains, and measures the result
 against an independent benchmark. The checks caught real bugs — a missing decoder
 input, an impossible test threshold, a lying status line.
 
-The result is a model that's barely different from the one I started with, and I
-can explain exactly why: I fine-tuned it on data it had already been trained on.
-That's a data selection mistake, it's visible in the loss curve, and it's the
-first thing I'd fix.
+The result is a model that's slightly better on the corpus I trained it on and
+slightly worse at translating Marathi in general, and I can explain exactly why:
+I fine-tuned it on data it had already been trained on. That's a data selection
+mistake, it's visible in the loss curve and in the two evaluation numbers
+disagreeing with each other, and it's the first thing I'd fix.
