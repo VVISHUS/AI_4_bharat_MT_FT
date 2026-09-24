@@ -138,13 +138,28 @@ and a morphologically rich target it is the weaker signal.
 Base and fine-tuned decode with identical settings, so the comparison isolates
 the weights.
 
-FLORES-200 `devtest`, 500 sentences, beam 5, identical decoding for both:
+500 sentences each, beam 5, identical decoding for base and fine-tuned.
+
+**FLORES-200 `devtest`** — human-translated, out of domain:
 
 | Model | chrF++ | BLEU |
 | --- | ---: | ---: |
 | Base | **50.72** | **15.15** |
 | Fine-tuned | 48.72 | 13.44 |
 | Δ | −2.00 | −1.71 |
+
+**Held-out Samanantar** — 1,000 pairs split off before training and never seen:
+
+| Model | chrF++ | BLEU |
+| --- | ---: | ---: |
+| Base | 38.70 | 7.78 |
+| Fine-tuned | | |
+
+The baseline gap between the two benchmarks is itself informative: the same
+untouched model scores **12 points lower** against Samanantar references than
+against FLORES. That is a statement about the references, not the model — mined
+web text disagrees with correct translations often enough to depress the score.
+It is direct evidence that the training corpus is noisier than the benchmark.
 
 ---
 

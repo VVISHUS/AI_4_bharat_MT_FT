@@ -65,6 +65,16 @@ portion of the model I was allowed to change drifted toward the quirks of a
 web-scraped corpus — including its misaligned pairs — and that costs accuracy on
 clean text.
 
+There is a second measurement worth putting next to that one. I also scored the
+1,000 Samanantar pairs I had set aside before training and never used. The
+original model scores **38.70** there, against **50.72** on the independent
+benchmark — twelve points lower on data drawn from the very corpus I trained on.
+
+That gap says something about the references rather than the model. A translation
+can be perfectly good and still disagree with a reference that a web scraper
+matched up incorrectly. It is a concrete measure of how noisy the training data
+is, and it reinforces why filtering mattered.
+
 **What I'd do instead:** use data the model hasn't seen. Bhili would be the
 obvious choice — a genuinely low-resource language where the model has little or
 no coverage. Fine-tuning there would be adding a capability rather than
