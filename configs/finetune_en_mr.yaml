@@ -146,18 +146,28 @@ training:
   report_to: none
 
 evaluation:
-  # AI4Bharat's own benchmark -- more on-ecosystem than FLORES, and this model
-  # family was not tuned on it. VERIFY the config name on the Hub before the
-  # run; evaluate.py falls back to FLORES if the load fails.
-  dataset: ai4bharat/IN22-Gen
-  dataset_config: eng_Latn-mar_Deva
-  split: test
-  fallback_dataset: facebook/flores
-  fallback_config: eng_Latn-mar_Deva
-  fallback_split: devtest
+  # Benchmark candidates, tried in order; the first that loads wins.
+  #
+  # Why a list rather than one name: IN22-Gen has been repackaged as parquet, so
+  # the per-language-pair config names on its dataset card ("eng_Latn-mar_Deva")
+  # may no longer exist, and its split is "gen" rather than "test". FLORES is
+  # gated and cannot be used as a silent fallback. Rather than bet on one shape
+  # and fail at evaluation time, we try the plausible ones and log which worked.
+  #
+  # NOTE: ai4bharat/IN22-Gen is gated="auto". Accept the terms once at
+  #   https://huggingface.co/datasets/ai4bharat/IN22-Gen
+  # (separate from the model's terms) and set HF_TOKEN.
+  candidates:
+    - {dataset: ai4bharat/IN22-Gen, config: null,                split: train}
+    - {dataset: ai4bharat/IN22-Gen, config: eng_Latn-mar_Deva,   split: gen}
+    - {dataset: ai4bharat/IN22-Gen, config: all,                 split: gen}
+    - {dataset: ai4bharat/IN22-Gen, config: null,                split: gen}
+    - {dataset: Muennighoff/flores200, config: eng_Latn-mar_Deva, split: devtest}
+    - {dataset: facebook/flores,    config: eng_Latn-mar_Deva,   split: devtest}
+
   max_eval_samples: 500
-  # Beam search restored now that the cache works. Base and fine-tuned use the
-  # IDENTICAL setting, so the comparison isolates the weights.
+  # Beam search. Base and fine-tuned use the IDENTICAL setting, so the
+  # comparison isolates the weights.
   num_beams: 5
   max_length: 256
   # chrF++ is the primary metric: BLEU is unreliable for morphologically rich

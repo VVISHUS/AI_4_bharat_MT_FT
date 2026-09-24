@@ -36,32 +36,73 @@ LOGGER = logging.getLogger("evaluate")
 
 
 def load_benchmark(eval_cfg: dict, src_lang: str, tgt_lang: str):
-    """Load IN22-Gen, falling back to FLORES if the config name has drifted.
+    """Load the first benchmark candidate that works.
 
-    Hub config names for these benchmarks change between revisions, so rather
-    than hardcode and fail at minute 40 of a deadline, we try and fall back.
+    Hub packaging for these benchmarks drifts. IN22-Gen has been repackaged as
+    parquet, so the per-pair config names on its card ("eng_Latn-mar_Deva") may
+    no longer exist and its split is "gen" rather than "test". FLORES is gated
+    and so cannot serve as a silent fallback. Rather than hardcode one shape and
+    discover the mistake at evaluation time, try the plausible ones and say
+    which worked.
     """
-    attempts = [
-        (eval_cfg["dataset"], eval_cfg["dataset_config"], eval_cfg["split"]),
-        (
-            eval_cfg["fallback_dataset"],
-            eval_cfg["fallback_config"],
-            eval_cfg["fallback_split"],
-        ),
-    ]
-    last_error: Exception | None = None
-    for name, config, split in attempts:
+    candidates = eval_cfg.get("candidates")
+    if not candidates:  # legacy config shape
+        candidates = [
+            {"dataset": eval_cfg["dataset"], "config": eval_cfg.get("dataset_config"),
+             "split": eval_cfg.get("split", "test")},
+            {"dataset": eval_cfg["fallback_dataset"], "config": eval_cfg.get("fallback_config"),
+             "split": eval_cfg.get("fallback_split", "devtest")},
+        ]
+
+    errors: list[str] = []
+    for candidate in candidates:
+        name = candidate["dataset"]
+        config = candidate.get("config")
+        split = candidate.get("split")
+        label = f"{name}/{config or '<default>'}[{split}]"
         try:
-            dataset = load_dataset(name, config, split=split, trust_remote_code=True)
-            LOGGER.info("Benchmark: %s/%s[%s] (%d rows)", name, config, split, len(dataset))
-            return dataset, name
-        except Exception as exc:  # noqa: BLE001 - we genuinely want any failure
-            LOGGER.warning("Could not load %s/%s: %s", name, config, exc)
-            last_error = exc
+            dataset = load_dataset(name, config, split=split)
+            LOGGER.info("Benchmark loaded: %s (%d rows)", label, len(dataset))
+            return dataset, label
+        except Exception as exc:  # noqa: BLE001 - any failure means "try the next"
+            short = str(exc).split("\n")[0][:160]
+            LOGGER.warning("  x %s -> %s", label, short)
+            errors.append(f"{label}: {short}")
+
     raise RuntimeError(
-        "No benchmark could be loaded. Check the dataset/config names in the "
-        f"`evaluation` block of your YAML. Last error: {last_error}"
+        "No benchmark could be loaded. Tried:\n  "
+        + "\n  ".join(errors)
+        + "\n\nIN22-Gen and FLORES are both GATED. Accept the terms while logged "
+        "in and set HF_TOKEN:\n"
+        "  https://huggingface.co/datasets/ai4bharat/IN22-Gen\n"
+        "Note this is separate from accepting the model's terms.\n"
+        "Alternatively run with --in-domain to score the held-out Samanantar "
+        "split instead, which needs no extra access."
     )
+
+
+def load_in_domain_split(cfg: dict):
+    """Rebuild the held-out Samanantar validation split used during training.
+
+    Deterministic: the same filters over the same stream, shuffled with the same
+    seed, yield the same rows the training run held out.
+
+    Scoring this *alongside* the out-of-domain benchmark is the point. The gap
+    between them is the evidence: a fine-tune that improves in-domain while
+    flat or worse out-of-domain has learned the mined corpus's quirks rather
+    than better Marathi.
+    """
+    from datasets import Dataset
+
+    from src.data import load_samanantar_pairs
+
+    data_cfg = cfg["data"]
+    pairs, _ = load_samanantar_pairs(data_cfg)
+    dataset = Dataset.from_list(pairs).shuffle(seed=cfg["seed"])
+    n_valid = min(data_cfg["valid_samples"], max(1, len(dataset) // 10))
+    valid = dataset.select(range(n_valid))
+    LOGGER.info("In-domain split: %d held-out Samanantar pairs", len(valid))
+    return valid, "samanantar-mr (held-out, in-domain)"
 
 
 def resolve_columns(dataset, src_lang: str, tgt_lang: str) -> tuple[str, str]:
@@ -151,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default=None, help="Path to the fine-tuned model/adapter.")
     parser.add_argument("--base-only", action="store_true", help="Score the base model alone.")
     parser.add_argument("--output", default=None, help="Where to write results (default: alongside checkpoint).")
+    parser.add_argument(
+        "--in-domain",
+        action="store_true",
+        help="Score the held-out Samanantar split instead of the benchmark. "
+             "Needs no gated access, and the in/out-of-domain gap is informative.",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config, args.overrides)
@@ -166,8 +213,13 @@ def main(argv: list[str] | None = None) -> int:
     strategy = detect_label_strategy(tokenizer)
     LOGGER.info("device=%s dtype=%s label_strategy=%s", device, dtype, strategy)
 
-    dataset, bench_name = load_benchmark(ecfg, src_lang, tgt_lang)
-    src_col, tgt_col = resolve_columns(dataset, src_lang, tgt_lang)
+    if args.in_domain:
+        dataset, bench_name = load_in_domain_split(cfg)
+        src_col, tgt_col = "src", "tgt"
+    else:
+        dataset, bench_name = load_benchmark(ecfg, src_lang, tgt_lang)
+        src_col, tgt_col = resolve_columns(dataset, src_lang, tgt_lang)
+
     n = min(ecfg["max_eval_samples"], len(dataset))
     dataset = dataset.select(range(n))
     sources = [s.strip() for s in dataset[src_col]]
@@ -224,10 +276,12 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output) if args.output else Path(args.checkpoint or "outputs").parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    (out_dir / "eval_results.json").write_text(
+    # Distinct filenames so an in-domain run does not clobber the benchmark run.
+    suffix = "_in_domain" if args.in_domain else ""
+    (out_dir / f"eval_results{suffix}.json").write_text(
         json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    (out_dir / "qualitative_samples.md").write_text(
+    (out_dir / f"qualitative_samples{suffix}.md").write_text(
         qualitative_table(
             sources, references, base_out, tuned_out, ecfg["num_qualitative_samples"]
         ),
