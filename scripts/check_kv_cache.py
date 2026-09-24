@@ -10,18 +10,17 @@ then does:
 
 which takes the wrong branch and dies on `NoneType.shape`.
 
-Without the KV cache, decoding recomputes the whole prefix at every step --
-quadratic instead of linear in output length, roughly 60x more work for a
-128-token translation. That is survivable for one final evaluation and fatal for
-anything that generates repeatedly.
+Without the KV cache, decoding recomputes the whole prefix at every step:
+quadratic instead of linear in output length. That is survivable for a single
+final evaluation and prohibitive for anything that generates repeatedly.
 
 This script answers, for any checkpoint, in about a minute:
 
     python scripts/check_kv_cache.py                                  # config default
     python scripts/check_kv_cache.py --model ai4bharat/indictrans2-en-indic-dist-200M
 
-It reports whether generation works with the cache ON, and how much slower OFF
-is, so the choice of checkpoint is made on measurements rather than assumption.
+It reports whether generation works with the cache on, and how much slower off
+is, so the choice is made on measurement rather than assumption.
 """
 
 from __future__ import annotations
@@ -134,29 +133,6 @@ def main() -> int:
     else:
         print(f"FAILED -- {off_result}")
 
-    # ---------------------------------------------------------------- opt-out
-    # Long shot worth 5 seconds: modern generate() only builds a Cache object
-    # when _supports_default_dynamic_cache() says the model handles one. Custom
-    # remote code inherits a True from GenerationMixin it does not deserve.
-    # Forcing it False may make generate() fall back to passing None on the
-    # first step, which is exactly what this legacy code expects.
-    opt_out_time = None
-    if not cache_works:
-        rule("C. Cache ON after opting out of the default dynamic cache")
-        try:
-            model._supports_default_dynamic_cache = lambda: False
-            opt_out_time, opt_out_result = timed_generate(
-                model, tokenizer, processor, SENTENCES, True, args.num_beams, args.max_length
-            )
-            if opt_out_time is not None:
-                print(f"OK -- {opt_out_time:.2f}s for {len(SENTENCES)} sentences")
-                for src, out in zip(SENTENCES, opt_out_result):
-                    print(f"  EN: {src}\n  MR: {out}")
-            else:
-                print(f"FAILED -- {opt_out_result}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"FAILED to apply opt-out -- {type(exc).__name__}: {exc}")
-
     # ---------------------------------------------------------------- verdict
     rule("Verdict")
     if cache_works and off_time:
@@ -172,10 +148,6 @@ def main() -> int:
     else:
         per_sentence = off_time / len(SENTENCES) if off_time else None
         print("Cache cannot be enabled on this checkpoint (stale remote code).")
-        if opt_out_time is not None:
-            print(f"BUT the dynamic-cache opt-out worked: {opt_out_time:.2f}s "
-                  f"vs {off_time:.2f}s without. Worth wiring into modeling.py.")
-            return 0
         if per_sentence is not None:
             print(f"\nNo-cache decoding measured at {per_sentence:.2f} s/sentence "
                   f"(beam={args.num_beams}).")

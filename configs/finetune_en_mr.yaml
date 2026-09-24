@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Fine-tune rotary-IndicTrans2-dist-200M on English -> Marathi (Samanantar).
+# Fine-tune IndicTrans2-dist-200M on English -> Marathi (Samanantar).
 # Everything tunable lives here so that train.py never needs editing to run a
 # different experiment. Override any leaf from the CLI: --set training.lr=3e-5
 # ---------------------------------------------------------------------------
@@ -7,41 +7,26 @@
 seed: 42
 
 model:
-  # Official AI4Bharat checkpoint. Switched here from
-  #   prajdabre/rotary-indictrans2-en-indic-dist-200M
-  # after that fork proved to be unmaintained against modern transformers: its
-  # remote code predates the Cache API (generation crashes with the KV cache on)
-  # and never derives decoder_input_ids from labels (training crashes outright).
-  # Working around both was possible but left generation ~60x slower.
-  #
-  # NOTE: this repo is gated="auto" on the Hub -- accept the terms once while
-  # logged in, then provide an HF token. No manual approval wait.
-  #
-  # Secondary benefit: the rotary fork exists for DOCUMENT-level translation,
-  # while Samanantar is sentence-level. This checkpoint matches the data.
+  # Sentence-level en-indic checkpoint, matching Samanantar's granularity.
+  # Gated="auto" on the Hub: accept the terms once while logged in and set
+  # HF_TOKEN; there is no manual approval wait.
   name: ai4bharat/indictrans2-en-indic-dist-200M
   # Both tokenizer and model ship custom code on the Hub; without this the
   # load fails outright (the architecture is not in transformers upstream).
   trust_remote_code: true
   # bf16 on Ampere+ (T4 does NOT support bf16 -> falls back to fp16 in train.py)
   dtype: auto
-  # KV cache OFF -- measured, not assumed. Run:
-  #     python scripts/check_kv_cache.py
+  # KV cache OFF. The published IndicTrans2 remote modeling code targets the
+  # pre-4.43 transformers API; under 4.56 generate() passes an empty
+  # EncoderDecoderCache and the code dies on NoneType.shape.
   #
-  # BOTH the official ai4bharat checkpoint and prajdabre's rotary fork ship
-  # remote modeling code written against the pre-4.43 transformers API. With
-  # transformers 4.56 the cache cannot be enabled on either: generate() passes
-  # an empty EncoderDecoderCache and the code dies on NoneType.shape.
+  # Verify for any checkpoint with: python scripts/check_kv_cache.py
   #
-  # This costs far less than feared. Measured on a T4, beam=5, cache off:
-  #     0.77s for 4 sentences  ->  ~0.19 s/sentence
-  # so a 500-sentence benchmark decodes in ~95s. Training is unaffected
-  # regardless: teacher forcing is one parallel pass and never decodes
+  # Cost is modest. Measured on a T4 at beam=5 with the cache off:
+  #     0.77s for 4 sentences -> ~0.19 s/sentence
+  # so a 500-sentence benchmark decodes in ~95s. Training is unaffected either
+  # way: teacher forcing is a single parallel pass and never decodes
   # step by step.
-  #
-  # The earlier 50-minute evaluations were NOT caused by this. They were
-  # generation-based eval running during training, on a LoRA-wrapped model,
-  # over 1000 samples, seven times. That is off now (see eval_during_training).
   use_cache: false
 
 data:
@@ -54,10 +39,9 @@ data:
   src_column: src
   tgt_column: tgt
 
-  # Samanantar-mr is 3.63M mined pairs. We deliberately subset: the assignment
-  # is graded on the pipeline working end-to-end, not on corpus size, and a
-  # 120k-pair run finishes inside one Colab session. Raise this if you have
-  # the budget -- nothing else in the pipeline needs to change.
+  # Samanantar-mr is 3.63M mined pairs; this is a deliberate compute budget.
+  # A 120k-pair run finishes inside one Colab session. Raise it freely --
+  # nothing else in the pipeline needs to change.
   max_train_samples: 120000
   # Held out from the SAME distribution, purely to watch for overfitting.
   # Real quality reporting happens on IN22-Gen in evaluate.py.
@@ -93,11 +77,11 @@ peft:
   alpha: 32
   dropout: 0.05
   # Attention + FFN projections. Names are resolved defensively in train.py
-  # because the rotary variant renames some modules vs. vanilla IndicTrans2.
+  # because module naming varies between IndicTrans2 variants.
   target_modules: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]
 
 training:
-  output_dir: outputs/rotary-it2-en-mr
+  output_dir: outputs/indictrans2-en-mr
   num_train_epochs: 1
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
@@ -117,27 +101,20 @@ training:
   # the run, because this checkpoint forces the KV cache off and any decoding
   # becomes quadratic in output length.
   #
-  # Real quality is measured once, properly, on the held-out IN22-Gen benchmark
-  # via evaluate.py. Set this to true only if you specifically want a mid-run
-  # curve, and expect the run to take substantially longer.
-  # OFF. Turned back on briefly on the assumption the KV cache would work on
-  # the official checkpoint; it does not (see model.use_cache), so this reverts.
+  # Evaluation during training is off. The validation split is held-out rows of
+  # the same mined corpus, so a better score there largely reflects fitting the
+  # miner's noise; and with the KV cache disabled, generation-based eval is the
+  # most expensive thing in the run. Held-out quality is measured once, on
+  # IN22-Gen, in evaluate.py. The loss curve comes from trainer_state.json.
   #
-  # It buys little regardless: the validation split is held-out rows of the same
-  # MINED corpus we train on, so a better score there largely means fitting the
-  # miner's noise. Real quality is measured once on the held-out, human-curated
-  # IN22-Gen benchmark in evaluate.py. The training loss curve for the README
-  # comes from trainer_state.json either way.
+  # Set true for a mid-run curve, and expect a substantially longer run.
   eval_during_training: false
   eval_steps: 500
   save_steps: 500
   save_total_limit: 2
-  # Generation-based eval DURING training is off. It interacts badly with the
-  # disabled KV cache this checkpoint forces on us: decoding becomes quadratic
-  # in output length, and with 5 beams over 1000 samples a single evaluation
-  # took ~50 minutes -- 7 of those would add ~6h to a 52min training run.
-  # We evaluate on loss here (one forward pass, seconds) and measure real
-  # translation quality once, properly, on IN22-Gen in evaluate.py.
+  # Loss-only evaluation. With the KV cache disabled, decoding is quadratic in
+  # output length: beam=5 over 1000 samples costs ~50 minutes per pass against
+  # a 52-minute training run.
   predict_with_generate: false
   generation_num_beams: 5
   generation_max_length: 128
@@ -148,22 +125,17 @@ training:
 evaluation:
   # Benchmark candidates, tried in order; the first that loads wins.
   #
-  # Why a list rather than one name: IN22-Gen has been repackaged as parquet, so
-  # the per-language-pair config names on its dataset card ("eng_Latn-mar_Deva")
-  # may no longer exist, and its split is "gen" rather than "test". FLORES is
-  # gated and cannot be used as a silent fallback. Rather than bet on one shape
-  # and fail at evaluation time, we try the plausible ones and log which worked.
+  # Tried in order; the first that loads wins. Hub packaging drifts, so this is
+  # a list rather than a single name: IN22-Gen has been repackaged as parquet
+  # under a single "default" config with a "test" split, which is not what its
+  # dataset card describes.
   #
-  # NOTE: ai4bharat/IN22-Gen is gated="auto". Accept the terms once at
+  # Both are gated="auto" -- accept the terms once at
   #   https://huggingface.co/datasets/ai4bharat/IN22-Gen
-  # (separate from the model's terms) and set HF_TOKEN.
+  # (separate from the model's) and set HF_TOKEN.
   candidates:
-    - {dataset: ai4bharat/IN22-Gen, config: null,                split: train}
-    - {dataset: ai4bharat/IN22-Gen, config: eng_Latn-mar_Deva,   split: gen}
-    - {dataset: ai4bharat/IN22-Gen, config: all,                 split: gen}
-    - {dataset: ai4bharat/IN22-Gen, config: null,                split: gen}
-    - {dataset: Muennighoff/flores200, config: eng_Latn-mar_Deva, split: devtest}
-    - {dataset: facebook/flores,    config: eng_Latn-mar_Deva,   split: devtest}
+    - {dataset: ai4bharat/IN22-Gen, config: null,                 split: test}
+    - {dataset: facebook/flores,    config: eng_Latn-mar_Deva,    split: devtest}
 
   max_eval_samples: 500
   # Beam search. Base and fine-tuned use the IDENTICAL setting, so the

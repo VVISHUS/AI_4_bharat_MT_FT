@@ -1,8 +1,8 @@
-"""Fine-tune rotary-IndicTrans2-dist-200M on Samanantar en->mr.
+"""Fine-tune IndicTrans2-dist-200M on Samanantar en->mr.
 
 Usage
 -----
-    # 1. sanity: overfit 32 pairs. Loss MUST collapse toward zero.
+    # 1. sanity: overfit 32 pairs. Loss must collapse toward the smoothing floor.
     python -m src.train --config configs/finetune_en_mr.yaml --smoke
 
     # 2. the real run
@@ -11,19 +11,17 @@ Usage
     # 3. anything can be overridden without editing the YAML
     python -m src.train --set training.learning_rate=5e-5 peft.enabled=false
 
-The `--smoke` path exists because the expensive failure mode in seq2seq
-fine-tuning is a label pipeline that is subtly wrong: training runs, loss
-decreases, and the model has learned nothing. Overfitting a handful of examples
-is the cheapest possible test that gradients actually reach the target text.
+The `--smoke` path guards the expensive failure mode in seq2seq fine-tuning:
+a label pipeline that is subtly wrong still trains, still shows a falling loss,
+and still learns nothing. Overfitting a handful of examples is the cheapest
+check that gradients actually reach the target text.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -50,9 +48,8 @@ LOGGER = logging.getLogger("train")
 def build_compute_metrics(tokenizer, strategy: str):
     """chrF++ on the in-domain validation split, for a during-training signal.
 
-    This is NOT the headline number -- Samanantar validation is in-domain and
-    mined, so it flatters the model. evaluate.py reports the real figure on the
-    held-out IN22-Gen benchmark.
+    Not the headline number: the Samanantar validation split is in-domain and
+    mined, so it flatters the model. evaluate.py reports the held-out figure.
     """
     import sacrebleu
 
@@ -91,8 +88,7 @@ class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
         ValueError: You have to specify either decoder_input_ids or
                     decoder_inputs_embeds
 
-    Inference is unaffected because `generate()` constructs decoder inputs on
-    its own -- which is why the probe passed and training did not.
+    Inference is unaffected, since `generate()` constructs decoder inputs itself.
 
     The shift is the standard fairseq/BART one:
 
@@ -128,14 +124,12 @@ class DataCollatorWithDecoderInputs(DataCollatorForSeq2Seq):
 def label_smoothing_floor(vocab_size: int, epsilon: float) -> float:
     """Minimum achievable cross-entropy under label smoothing.
 
-    With smoothing, the target is not one-hot: it puts (1-e+e/V) on the correct
-    token and e/V on every other. A perfect model therefore still incurs the
-    entropy of that smoothed target. For V=32322 and e=0.1 the floor is ~1.36,
-    so any smoke test asserting "loss must approach zero" is unsatisfiable.
+    The smoothed target is not one-hot: it puts (1-e+e/V) on the correct token
+    and e/V on every other, so a perfect model still incurs that target's
+    entropy. For V=32322 and e=0.1 the floor is ~1.36.
 
-    This function exists because that exact mistake cost a debugging cycle: the
-    threshold was set to 1.0, below a floor of 1.363, and the test reported a
-    correct pipeline as broken.
+    Overfit thresholds must be expressed relative to this floor -- an absolute
+    "loss must approach zero" check is unsatisfiable whenever smoothing is on.
     """
     import math
 
@@ -146,69 +140,6 @@ def label_smoothing_floor(vocab_size: int, epsilon: float) -> float:
     nll = -math.log(p_correct)
     smoothed = -(math.log(p_correct) + (vocab_size - 1) * math.log(p_other)) / vocab_size
     return (1.0 - epsilon) * nll + epsilon * smoothed
-
-
-def read_eval_strategy(training_args) -> str:
-    """Return the eval strategy as a string, whatever transformers calls it.
-
-    `evaluation_strategy` was renamed `eval_strategy`, and the value is an
-    IntervalStrategy enum whose str() is e.g. "IntervalStrategy.NO".
-    """
-    value = getattr(training_args, "eval_strategy", None)
-    if value is None:
-        value = getattr(training_args, "evaluation_strategy", "no")
-    return str(value)
-
-
-def eval_is_disabled(training_args) -> bool:
-    """True when no evaluation loop will run.
-
-    Deliberately a named, tested function rather than an inline check. The
-    previous inline version was `"no" in str(strategy)`, which is False for
-    "IntervalStrategy.NO" because of case -- so the log claimed eval was ON
-    during runs where it was correctly OFF, and sent us chasing a phantom for
-    hours. Compare the enum's final component, case-insensitively.
-    """
-    tail = read_eval_strategy(training_args).rsplit(".", 1)[-1].strip().upper()
-    return tail == "NO" and not getattr(training_args, "do_eval", False)
-
-
-def describe_eval_state(training_args) -> str:
-    return (
-        "OFF -- pure training run"
-        if eval_is_disabled(training_args)
-        else "ON (this is the slow path)"
-    )
-
-
-class NoEvalSeq2SeqTrainer(Seq2SeqTrainer):
-    """A Trainer that refuses to evaluate, loudly.
-
-    `eval_during_training` was silently re-enabled twice during development, and
-    each time the symptom was only "the run is slow" -- which is indistinguishable
-    from a dozen other causes and took hours to attribute. With the KV cache
-    disabled (which both IndicTrans2 checkpoints force on us) a single
-    generation-based eval pass over 1000 samples takes ~50 minutes.
-
-    Rather than trust configuration, this makes the failure impossible to miss:
-    if anything enters an eval loop while eval is meant to be off, the run dies
-    with a traceback that names the caller.
-    """
-
-    def evaluate(self, *args, **kwargs):
-        raise RuntimeError(
-            "evaluate() was called even though eval_during_training=false. "
-            "The traceback above names the caller. This path should be "
-            "unreachable: eval_strategy is NO, do_eval is False and eval_dataset "
-            "is None. If you see this, the running process is NOT using the "
-            "current config -- check for a stale process with: "
-            "ps aux | grep '[s]rc.train'"
-        )
-
-    def evaluation_loop(self, *args, **kwargs):
-        raise RuntimeError(
-            "evaluation_loop() entered although eval is disabled. See evaluate()."
-        )
 
 
 def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrainingArguments:
@@ -258,8 +189,8 @@ def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrai
             learning_rate=1e-4,
             warmup_ratio=0.0,
             logging_steps=5,
-            # No label smoothing in smoke mode. Smoothing floors the loss near
-            # 1.36 for this vocab, which makes "did it memorise?" unanswerable.
+            # No label smoothing here: it floors the loss near 1.36 for this
+            # vocab, which makes "did it memorise?" unanswerable.
             label_smoothing_factor=0.0,
             save_strategy="no",
             eval_strategy="no",
@@ -305,7 +236,7 @@ def build_training_args(cfg: dict, output_dir: Path, smoke: bool) -> Seq2SeqTrai
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = base_arg_parser("Fine-tune IndicTrans2 (rotary) on Samanantar en->mr.")
+    parser = base_arg_parser("Fine-tune IndicTrans2 on Samanantar en->mr.")
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -316,15 +247,6 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config, args.overrides)
     set_seed(cfg["seed"])
 
-    # Printed so a running process can be matched against `ps aux`. A
-    # `git reset --hard` updates files on disk but cannot change the config an
-    # already-running process read minutes ago.
-    LOGGER.info(
-        "PID=%s | started=%s | config=%s",
-        os.getpid(),
-        datetime.now().isoformat(timespec="seconds"),
-        Path(args.config).resolve(),
-    )
 
     output_dir = Path(cfg["training"]["output_dir"])
     if args.smoke:
@@ -339,20 +261,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- data -------------------------------------------------------------
     if args.smoke:
-        # Deliberately tiny, and NOT deduped against itself: we want the model
-        # to memorise these 32 pairs.
+        # Deliberately tiny: the goal is for the model to memorise these pairs.
         cfg["data"] = {**cfg["data"], "max_train_samples": 32, "valid_samples": 8}
-        # Full fine-tuning for the smoke test. Memorising a handful of examples
-        # is a full-FT capability; LoRA at r=16 updates 2.97% of the weights and
-        # cannot do it, so a LoRA smoke test measures the adapter's capacity
-        # rather than whether the label pipeline is wired correctly.
+        # Full fine-tuning for the smoke test: memorisation is a full-FT
+        # capability. LoRA at r=16 updates ~3% of the weights, so a LoRA smoke
+        # test measures adapter capacity rather than label-pipeline correctness.
         if cfg["peft"]["enabled"]:
             LOGGER.info("smoke mode: disabling LoRA so memorisation is possible")
             cfg["peft"] = {**cfg["peft"], "enabled": False}
 
     processor = ProcessorAdapter(inference=False)
     train_ds, valid_ds, report, strategy = build_datasets(
-        tokenizer, processor, cfg["data"], seed=cfg["seed"]
+        tokenizer,
+        processor,
+        cfg["data"],
+        seed=cfg["seed"],
+        save_valid_to=output_dir / "valid_split.jsonl",
     )
 
     LOGGER.info("Filter funnel:\n%s", report.to_markdown())
@@ -409,20 +333,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     training_args = build_training_args(cfg, output_dir, args.smoke)
-    eval_strategy = read_eval_strategy(training_args)
-    LOGGER.info(
-        "effective eval settings -> strategy=%s predict_with_generate=%s beams=%s",
-        eval_strategy,
-        training_args.predict_with_generate,
-        training_args.generation_num_beams,
-    )
-    LOGGER.info("EVAL DURING TRAINING IS %s", describe_eval_state(training_args))
-    # Pick the Trainer that matches the intent, so a mismatch cannot be quiet.
     eval_enabled = not args.smoke and cfg["training"].get("eval_during_training", False)
-    trainer_cls = Seq2SeqTrainer if eval_enabled else NoEvalSeq2SeqTrainer
-    LOGGER.info("trainer class: %s", trainer_cls.__name__)
+    LOGGER.info(
+        "evaluation during training: %s", "on" if eval_enabled else "off"
+    )
 
-    trainer = trainer_cls(
+    trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -473,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
 
     trainer.save_model(str(output_dir / "final"))
     tokenizer.save_pretrained(str(output_dir / "final"))
+    # save_model writes weights only; the full log history (for the loss curve)
+    # lives in trainer state, which has to be saved separately.
+    trainer.save_state()
     (output_dir / "train_metrics.json").write_text(
         json.dumps(result.metrics, indent=2), encoding="utf-8"
     )

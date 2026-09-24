@@ -1,8 +1,7 @@
 """YAML config loading with dotted CLI overrides.
 
-Kept deliberately tiny -- the alternative (hydra/omegaconf) is more dependency
-surface than a one-day assignment justifies, and plain dicts are easier to dump
-into the run directory for reproducibility.
+Kept small on purpose: hydra/omegaconf would add dependency surface for little
+gain here, and plain dicts are easy to snapshot into the run directory.
 """
 
 from __future__ import annotations

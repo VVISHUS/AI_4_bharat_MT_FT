@@ -39,8 +39,7 @@ class ProcessorAdapter:
     """Thin wrapper over IndicTransToolkit's IndicProcessor.
 
     The toolkit's API has shifted between releases (notably whether
-    `preprocess_batch` accepts `is_target`), so we introspect rather than pin a
-    version we cannot verify in this environment.
+    `preprocess_batch` accepts `is_target`), so introspect rather than pin.
     """
 
     def __init__(self, inference: bool = False) -> None:
@@ -203,8 +202,8 @@ def filter_stream(
 ) -> tuple[list[dict], FilterReport]:
     """Run the funnel over a stream, stopping once `target_size` pairs survive.
 
-    Streaming rather than materialising 3.63M rows keeps peak RAM inside a free
-    Colab instance, which is the reason for the early exit.
+    Streaming rather than materialising 3.63M rows keeps peak RAM low, which is
+    the reason for the early exit.
     """
     stages = build_filter_funnel(filters)
     report = FilterReport(stages=stages)
@@ -274,9 +273,9 @@ def filter_stream(
 def detect_label_strategy(tokenizer) -> str:
     """Work out how to tokenise the Marathi side with the TARGET vocabulary.
 
-    See the module docstring: getting this wrong is silent. We probe for the
-    three known IndicTrans2 tokenizer APIs and raise if none is present rather
-    than falling through to the source vocabulary.
+    Getting this wrong is silent, so probe for the three known IndicTrans2
+    tokenizer APIs and raise if none is present rather than falling through to
+    the source vocabulary.
 
     Returns one of: 'text_target' | 'src_flag' | 'as_target_tokenizer'
     """
@@ -401,8 +400,15 @@ def build_datasets(
     processor: ProcessorAdapter,
     data_cfg: dict,
     seed: int,
+    save_valid_to=None,
 ) -> tuple[Dataset, Dataset, FilterReport, str]:
-    """Full path: load -> filter -> split -> tokenise."""
+    """Full path: load -> filter -> split -> tokenise.
+
+    The held-out split is written to `save_valid_to` as JSON lines. Evaluation
+    reads that file rather than re-deriving the split, so the test set is fixed
+    at training time instead of depending on the corpus streaming identically
+    months later.
+    """
     pairs, report = load_samanantar_pairs(data_cfg)
     if not pairs:
         raise RuntimeError("Every pair was filtered out -- loosen the config filters.")
@@ -411,6 +417,10 @@ def build_datasets(
     n_valid = min(data_cfg["valid_samples"], max(1, len(dataset) // 10))
     valid_raw = dataset.select(range(n_valid))
     train_raw = dataset.select(range(n_valid, len(dataset)))
+
+    if save_valid_to is not None:
+        valid_raw.to_json(str(save_valid_to), orient="records", lines=True, force_ascii=False)
+        LOGGER.info("Held-out split written to %s (%d pairs)", save_valid_to, len(valid_raw))
 
     strategy = detect_label_strategy(tokenizer)
     LOGGER.info("Target-side tokenisation strategy: %s", strategy)

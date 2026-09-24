@@ -41,19 +41,19 @@ def load_tokenizer(model_cfg: dict):
 def disable_kv_cache(model):
     """Turn off the KV cache, working around stale remote modeling code.
 
-    This checkpoint's `modeling_rotary_indictrans.py` was written against the
-    pre-4.43 transformers API, where `generate()` passed `past_key_values=None`
-    on the first decoding step. Modern transformers passes an *empty*
+    The published IndicTrans2 remote modeling code targets the pre-4.43
+    transformers API, where `generate()` passed `past_key_values=None` on the
+    first decoding step. Modern transformers passes an *empty*
     `EncoderDecoderCache` instead, so the remote code's
 
         past_key_values[0][0].shape[2] if past_key_values is not None else 0
 
     takes the wrong branch and dies on `NoneType.shape`.
 
-    Disabling the cache sidesteps the branch entirely: decoding recomputes the
-    full prefix each step. That is slower (roughly quadratic rather than linear
-    in output length) but numerically identical. Training is unaffected either
-    way -- teacher forcing never uses the cache.
+    Disabling the cache sidesteps the branch: decoding recomputes the full
+    prefix each step, which is slower (quadratic rather than linear in output
+    length) but numerically identical. Training is unaffected -- teacher forcing
+    never uses the cache.
     """
     model.config.use_cache = False
     if getattr(model, "generation_config", None) is not None:
@@ -74,8 +74,8 @@ def load_model(model_cfg: dict, dtype: torch.dtype | None = None):
         kwargs["torch_dtype"] = dtype
     model = AutoModelForSeq2SeqLM.from_pretrained(model_cfg["name"], **kwargs)
 
-    # Default to off: this checkpoint's remote code predates the Cache API.
-    # See disable_kv_cache() for the full explanation.
+    # Off by default: the remote code predates the Cache API. See
+    # disable_kv_cache().
     if not model_cfg.get("use_cache", False):
         model = disable_kv_cache(model)
     return model
@@ -84,10 +84,9 @@ def load_model(model_cfg: dict, dtype: torch.dtype | None = None):
 def resolve_lora_targets(model, requested: list[str]) -> list[str]:
     """Keep only the requested module names that this checkpoint actually has.
 
-    The rotary variant renames parts of the attention block relative to vanilla
-    IndicTrans2. Passing a name that does not exist makes PEFT raise a fairly
-    opaque error, so we intersect against the real module names first and fall
-    back to every nn.Linear leaf if nothing matches.
+    Module naming varies between IndicTrans2 variants, and passing a name that
+    does not exist makes PEFT raise an opaque error. Intersect against the real
+    module names first, falling back to every nn.Linear leaf if nothing matches.
     """
     present = {name.split(".")[-1] for name, _ in model.named_modules()}
     matched = [name for name in requested if name in present]
@@ -127,18 +126,16 @@ def attach_lora(model, peft_cfg: dict):
         model = get_peft_model(model, config)
     except ImportError as exc:
         # PEFT's LoRA dispatcher probes for optional quantization backends and
-        # RAISES on a too-old torchao rather than treating it as unavailable.
-        # Colab preinstalls torchao 0.10 against peft's >0.16 floor, so this
-        # fires on an otherwise healthy environment. Translate it into advice.
+        # raises on a too-old torchao instead of treating it as unavailable.
+        # Turn that into actionable advice.
         if "torchao" not in str(exc):
             raise
         raise ImportError(
             f"{exc}\n\n"
-            "This is an environment conflict, not a model problem. We use no "
-            "quantization, so either:\n"
+            "Environment conflict, not a model problem. No quantization is used "
+            "here, so either:\n"
             "  pip uninstall -y torchao\n"
-            "or skip LoRA entirely -- full fine-tuning fits a 16GB GPU at this "
-            "model size:\n"
+            "or skip LoRA -- full fine-tuning fits a 16GB GPU at this size:\n"
             "  python -m src.train --set peft.enabled=false"
         ) from exc
 

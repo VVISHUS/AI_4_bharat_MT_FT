@@ -29,8 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-MODEL = "prajdabre/rotary-indictrans2-en-indic-dist-200M"
-SRC_LANG, TGT_LANG = "eng_Latn", "mar_Deva"
+from src.config import load_config
+
+_CFG = load_config("configs/finetune_en_mr.yaml")
+MODEL = _CFG["model"]["name"]
+SRC_LANG, TGT_LANG = _CFG["data"]["src_lang"], _CFG["data"]["tgt_lang"]
 
 EN_SAMPLES = [
     "The weather is pleasant today.",
@@ -76,8 +79,7 @@ def main() -> int:
     with torch.inference_mode():
         generated = model.generate(
             **encoded, num_beams=5, max_length=128, early_stopping=True,
-            # This checkpoint's remote code predates the transformers Cache
-            # API and crashes with it enabled. See modeling.disable_kv_cache().
+            # See modeling.disable_kv_cache().
             use_cache=False,
         )
     decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
@@ -136,9 +138,9 @@ def main() -> int:
         print("PASS -- wire this strategy into src/data.py and run:")
         print("    python -m src.train --smoke")
     else:
-        print("FAIL -- do not start training. Inspect the tokenizer's source on")
-        print("the Hub (it is downloaded under ~/.cache/huggingface/modules/) and")
-        print("find the call that selects the target SentencePiece model.")
+        print("FAIL -- do not start training. Inspect the tokenizer source under")
+        print("~/.cache/huggingface/modules/ and find the call that selects the")
+        print("target SentencePiece model.")
     return 0 if ok else 1
 
 

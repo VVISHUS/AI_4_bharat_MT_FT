@@ -1,10 +1,11 @@
-# Fine-tuning rotary-IndicTrans2-200M for English → Marathi
+# IndicTrans2 English → Marathi fine-tuning
 
-Fine-tunes [`prajdabre/rotary-indictrans2-en-indic-dist-200M`](https://huggingface.co/prajdabre/rotary-indictrans2-en-indic-dist-200M)
+LoRA fine-tuning of [`ai4bharat/indictrans2-en-indic-dist-200M`](https://huggingface.co/ai4bharat/indictrans2-en-indic-dist-200M)
 on [`ai4bharat/samanantar`](https://huggingface.co/datasets/ai4bharat/samanantar) (`mr`),
-evaluated on IN22-Gen.
+with held-out evaluation on IN22-Gen.
 
-> **Status:** `<!-- fill in after your run -->`
+A plain-language account of the decisions, the problems hit along the way, and
+what I would change is in [APPROACH.md](APPROACH.md).
 
 ---
 
@@ -13,27 +14,32 @@ evaluated on IN22-Gen.
 ```bash
 pip install -r requirements.txt
 pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
+export HF_TOKEN=...        # the checkpoint and IN22-Gen are both gated (auto-approve)
 
-# 1. Settle the tokenizer question before anything else (see "The two-vocabulary trap")
+# 1. confirm how the tokenizer encodes target-side text
 python scripts/probe_tokenizer.py
 
-# 2. Prove the label pipeline works by overfitting 32 pairs
-python -m src.train --config configs/finetune_en_mr.yaml --smoke
+# 2. confirm whether the KV cache is usable on this checkpoint
+python scripts/check_kv_cache.py
 
-# 3. Baseline, before training — you need a "before" to claim a delta
-python -m src.evaluate --config configs/finetune_en_mr.yaml --base-only --output outputs/baseline
+# 3. overfit 32 pairs to prove the label pipeline is wired correctly
+python -m src.train --smoke
 
-# 4. The real run
-python -m src.train --config configs/finetune_en_mr.yaml
+# 4. baseline, before training
+python -m src.evaluate --base-only --output outputs/baseline
 
-# 5. Compare
-python -m src.evaluate --config configs/finetune_en_mr.yaml \
-    --checkpoint outputs/rotary-it2-en-mr/final \
-    --output outputs/rotary-it2-en-mr
+# 5. train
+python -m src.train
+
+# 6. evaluate, out of domain and in domain
+python -m src.evaluate --checkpoint outputs/indictrans2-en-mr/final \
+                       --output outputs/indictrans2-en-mr
+python -m src.evaluate --checkpoint outputs/indictrans2-en-mr/final \
+                       --output outputs/indictrans2-en-mr --in-domain
 ```
 
-Or run [`notebooks/colab_finetune_indictrans2_marathi.ipynb`](notebooks/colab_finetune_indictrans2_marathi.ipynb)
-end to end on a Colab T4.
+[`notebooks/colab_finetune_indictrans2_marathi.ipynb`](notebooks/colab_finetune_indictrans2_marathi.ipynb)
+drives the same pipeline on a Colab T4.
 
 Any config leaf can be overridden without editing YAML:
 
@@ -43,205 +49,213 @@ python -m src.train --set training.learning_rate=5e-5 peft.enabled=false
 
 ---
 
-## Repository layout
+## Layout
 
 ```
-configs/finetune_en_mr.yaml   all hyperparameters + filter thresholds, commented
+configs/finetune_en_mr.yaml   hyperparameters and filter thresholds
 src/config.py                 YAML loading, dotted CLI overrides, run snapshotting
-src/data.py                   Samanantar streaming, the filter funnel, tokenisation
-src/modeling.py               model/tokenizer loading, dtype selection, LoRA attachment
-src/train.py                  Seq2SeqTrainer setup; --smoke overfit mode
-src/evaluate.py               base vs fine-tuned on IN22-Gen; chrF++ / BLEU
-scripts/probe_tokenizer.py    the pre-flight correctness check
-tests/test_filters.py         filter-funnel tests; no GPU, no network, no deps
-notebooks/…ipynb              annotated Colab driver
-```
-
-The filter tests stub the `datasets` import, so they run anywhere:
-
-```bash
-python tests/test_filters.py        # or: python -m pytest tests/ -v
+src/data.py                   streaming, the filter funnel, tokenisation
+src/modeling.py               model/tokenizer loading, dtype, LoRA attachment
+src/train.py                  collator, Trainer setup, --smoke overfit mode
+src/evaluate.py               base vs fine-tuned; chrF++ / BLEU
+scripts/probe_tokenizer.py    target-vocabulary pre-flight check
+scripts/check_kv_cache.py     KV-cache compatibility and cost measurement
 ```
 
 ---
 
 ## Approach
 
-### Why MT, and why this checkpoint
+### Two SentencePiece vocabularies
 
-MT was chosen over ASR and TTS for one reason: it has the shortest path from
-"nothing" to "a verified end-to-end run", and the assignment is explicitly graded
-on getting a run working rather than on metrics. No audio decoding, no
-resampling, no vocoder, and an objective metric that takes seconds to compute.
-
-The `en-indic` direction matches Samanantar's layout directly — its `src` column
-is English and `tgt` is the Indic language, so `eng_Latn → mar_Deva` needs no
-inversion.
-
-### The document-level mismatch (read this first)
-
-The model card states these rotary checkpoints are **"primarily built and tested
-for document-level and long-context translations."** Samanantar is a
-*sentence-level* corpus. These are not aligned.
-
-This was a deliberate, documented choice rather than an oversight:
-
-- The assignment specifies a Marathi dataset from AIKosh or HuggingFace, and
-  Samanantar is the canonical large Marathi parallel corpus.
-- Rotary position embeddings do not *require* long inputs; they generalise
-  across lengths. Fine-tuning on short segments is valid, it simply exercises
-  none of the reason this variant exists.
-- The honest consequence: this run cannot demonstrate the checkpoint's actual
-  advantage over the sinusoidal baseline.
-
-With more time, the right corpus is **BPCC-doc** or another document-aligned
-source, training on multi-sentence windows with document context carried across
-segment boundaries. That would put the variant's long-context capability under
-actual load.
-
-### The two-vocabulary trap
-
-IndicTrans2 keeps **separate source and target SentencePiece vocabularies**.
-Encoding Marathi labels with the English-side vocabulary produces a failure that
-is entirely silent:
-
-1. The Marathi text shatters into character-level pieces and `<unk>`.
-2. Training runs without error.
-3. The loss decreases smoothly and looks healthy.
-4. The model learns nothing, and you find out at evaluation.
+IndicTrans2 keeps **separate source and target vocabularies** (`model.SRC` /
+`model.TGT`, 759 KB and 3.26 MB respectively — the target side covers 22
+languages). Encoding Marathi labels with the English-side vocabulary fails
+silently: the text fragments into `<unk>`, training runs, the loss falls
+smoothly, and the model learns nothing. The failure is invisible until decoding.
 
 `src/data.py:detect_label_strategy` therefore probes for the three known
-target-side APIs (`text_target=`, a `src=` boolean, `as_target_tokenizer()`) and
-**raises rather than falling back to the source vocabulary**. The same flag is
-threaded through decoding in `decode_targets`, because the mirror-image bug
-exists on the way out.
+target-side APIs (`text_target=`, an `src=` boolean, `as_target_tokenizer()`)
+and **raises rather than falling back to the source vocabulary**. The same flag
+is threaded through `decode_targets`, since the mirror-image bug exists on the
+way out. `scripts/probe_tokenizer.py` verifies it empirically with a Marathi
+round-trip and a tokens-per-character check: a healthy Indic SPM sits well under
+1.0, and anything near it indicates character fallback.
 
-`scripts/probe_tokenizer.py` verifies this empirically with a Marathi round-trip
-and a tokens-per-character check — a healthy Indic SPM sits well under 1.0;
-anything near it means character fallback, i.e. the wrong vocabulary.
-
-**Result on this checkpoint:** `<!-- paste the probe output -->`
+This checkpoint resolves to `text_target`.
 
 ### Data filtering
 
 Samanantar is **bitext-mined**, not human-curated, so misalignment, duplication
-and wrong-language rows occur at a meaningful rate. Every filter targets a
-specific observed failure and reports what it removed:
+and wrong-language rows occur at a measurable rate. Each filter targets one
+observed failure, and the funnel is reported per run:
 
-| Filter | Catches |
-| --- | --- |
-| `non_empty` | blank sides after strip |
-| `length_bounds` | fragments and headers; runaway rows that inflate padding |
-| `length_ratio` | misaligned pairs where one side isn't a translation of the other |
-| `script_check` | "Marathi" rows that are actually English, URLs or number tables |
-| `copy_pairs` | `src == tgt`, i.e. the miner gave up |
-| `dedup` / `dedup_source` | exact duplicates; Samanantar has many targets per source |
+| Stage | Dropped | Remaining |
+| --- | ---: | ---: |
+| raw pool | — | 137,428 |
+| `non_empty` — blank after strip | 0 | 137,428 |
+| `length_bounds` — outside [3, 80] words | 5,166 | 132,262 |
+| `length_ratio` — longer/shorter above 2.5× | 2,036 | 130,226 |
+| `script_check` — target under 55% Devanagari | 106 | 130,120 |
+| `copy_pairs` — source identical to target | 0 | 130,120 |
+| `dedup` — exact duplicate pair | 0 | 130,120 |
+| `dedup_source` — source already seen | 9,120 | **121,000** |
 
-Loading is **streaming with early exit** — 3.63M rows are never materialised,
-which keeps peak RAM inside a free Colab instance.
+**88.0% retained.** Two results worth noting: exact duplicate *pairs* are zero,
+suggesting Samanantar was already deduplicated upstream at pair level, while
+`dedup_source` is the largest single filter — the corpus genuinely carries
+multiple Marathi translations per English source.
 
-**Funnel from the actual run:**
+Loading streams with early exit, so the remaining ~3.5M rows are never
+downloaded. The subset is 121k pairs, **3.3% of the corpus**, a deliberate
+compute budget rather than a limitation.
 
-```
-<!-- paste outputs/rotary-it2-en-mr/filter_report.md -->
-```
-
-### Training configuration
+### Training
 
 | Choice | Value | Reasoning |
 | --- | --- | --- |
-| Subset | 120k pairs | Deliberate compute budget, not a limitation. ~3.7k optimiser steps — enough to move the model, short enough to finish and still write this up. |
-| LoRA | r=16, α=32 | ~1% trainable params, so optimiser state stays small and batch 16 fits a T4 with headroom. Set `peft.enabled=false` to full-fine-tune and compare. |
-| LR | 1e-4 | LoRA tolerates roughly 10× the full-FT rate since only adapters move. |
-| Effective batch | 32 | 16 × 2 gradient accumulation. MT benefits from larger batches; this is the most available cheaply. |
-| Label smoothing | 0.1 | Standard for NMT; reduces overconfidence. |
-| `group_by_length` | true | Batches similar-length sequences, cutting padding waste on variable-length MT data. |
-| Schedule | cosine, 3% warmup | Warmup matters — a cold high LR on an already-strong pretrained MT model degrades it quickly. |
-| Precision | auto | bf16 on Ampere+, fp16 on Turing. T4 has **no** bf16 support and asking for it doesn't error, so `src/modeling.py` checks instead of hardcoding. |
+| LoRA | r=16, α=32 | 6,488,064 / 218,264,576 params trainable (2.97%). Fits a T4 with headroom; `--set peft.enabled=false` for full FT |
+| LR | 1e-4 | LoRA tolerates ~10× the full-FT rate, since only adapters move |
+| Effective batch | 32 | 16 × 2 gradient accumulation |
+| Label smoothing | 0.1 | Standard for NMT. Puts a **floor** on the loss at ~1.363 for this vocab |
+| `group_by_length` | true | Batches similar lengths, cutting padding waste |
+| Schedule | cosine, 3% warmup | Warmup protects the pretrained weights from a cold high-LR shock |
+| Precision | auto | bf16 on Ampere+, fp16 on Turing (T4 has no bf16 support) |
+
+3,750 steps, 52m40s on a T4.
 
 ### Evaluation
 
-Scored on **IN22-Gen** (AI4Bharat's own benchmark), not a held-out Samanantar
-split. Evaluating on held-out rows of a mined corpus measures how well the model
-fits the miner's noise, which isn't the question. `src/evaluate.py` falls back to
-FLORES automatically if the Hub config name has drifted.
+Headline metric is **chrF++ on a human-curated, out-of-domain benchmark**.
+`--in-domain` additionally scores the held-out Samanantar split, and the gap
+between the two is the informative quantity: a fine-tune that improves in-domain
+while flat or worse out-of-domain has fitted the mined corpus's quirks rather
+than learned better Marathi.
 
-**chrF++ is the headline metric.** BLEU on a morphologically rich target with a
-single reference is noisy and rewards surface n-gram overlap; it's reported
-because it's expected, not because it's informative here.
+BLEU is reported alongside because it is expected, but with a single reference
+and a morphologically rich target it is the weaker signal.
 
-Base and fine-tuned are decoded with identical generation settings so the
-comparison isolates the weights.
+Base and fine-tuned decode with identical settings, so the comparison isolates
+the weights.
+
+FLORES-200 `devtest`, 500 sentences, beam 5, identical decoding for both:
 
 | Model | chrF++ | BLEU |
 | --- | ---: | ---: |
-| Base | `<!-- -->` | `<!-- -->` |
-| Fine-tuned | `<!-- -->` | `<!-- -->` |
-| Δ | `<!-- -->` | `<!-- -->` |
-
-`<!-- If fine-tuned < base, say so and give the mechanism. The likely one:
-IndicTrans2 was trained on BPCC, which already subsumes Samanantar plus far more
-curated data, so fine-tuning on 120k mined pairs narrows the distribution.
-Supporting evidence: the gap should be larger on IN22-Gen (out of domain) than
-on Samanantar validation (in domain). A candid analysis of a regression is a
-better result than a lucky number. -->`
+| Base | **50.72** | **15.15** |
+| Fine-tuned | 48.72 | 13.44 |
+| Δ | −2.00 | −1.71 |
 
 ---
 
-## Order of operations, and why
+## Results
 
-The pipeline is deliberately ordered so that the cheapest checks fail first:
+**Fine-tuning made the model worse by 2.0 chrF++.** That is the expected outcome
+here, and the reason is visible in the loss curve.
 
-1. **Probe the tokenizer** — settles the two-vocabulary question before any
-   code depends on the answer.
-2. **Overfit 32 pairs** — a 200M model should memorise them almost completely.
-   If loss doesn't collapse below 1.0, the label pipeline is broken. Two minutes
-   here prevents a wasted multi-hour run; `src/train.py` exits non-zero if it
-   fails.
-3. **Inspect the data funnel** — read thirty real rows before trusting any
-   threshold.
-4. **Baseline eval before training** — establishes the "before" number and
-   exercises the full inference path while there's still time to fix it.
+Training loss over one epoch:
+
+```
+step   50:  4.18
+step  200:  3.83
+step 3750:  3.74      (final train_loss 3.747)
+```
+
+Loss falls sharply through warmup and then flattens, moving 0.09 over the final
+3,550 steps. Three factors explain this, and they compound:
+
+1. **The data is inside the model's training distribution.** IndicTrans2 was
+   trained on BPCC, which incorporates Samanantar, and Marathi is one of its 22
+   core languages. This is continued training on material the model has already
+   seen, not the addition of a new language.
+2. **LoRA at r=16 moves 2.97% of the weights.**
+3. **Label smoothing floors the loss at 1.363**, so 3.74 is not convergence to
+   an optimum — it reflects how little signal was available to extract.
+
+A flat curve is the expected shape for this combination, not a defect. The
+regression follows from it directly: with little to gain in-distribution, the
+2.97% of weights that did move specialised toward a mined corpus with a
+measurable misalignment rate, and that specialisation costs accuracy on clean
+out-of-domain text.
+
+For a run with real headroom the corpus would need to sit outside BPCC:
+**Bhili** or another genuinely low-resource language, or a Marathi domain the
+base model handles poorly.
+
+---
+
+## Order of operations
+
+The pipeline is sequenced so the cheapest checks fail first:
+
+1. **Probe the tokenizer** — settles the two-vocabulary question before anything
+   depends on the answer.
+2. **Check the KV cache** — measures, rather than assumes, what generation costs.
+3. **Overfit 32 pairs** — with smoothing and LoRA disabled so zero is reachable,
+   loss must fall below 0.5. `src/train.py` exits non-zero otherwise.
+4. **Baseline evaluation** — establishes the "before" number and exercises the
+   full inference path while there is still time to fix it.
 5. **Train.**
-6. **Eval + qualitative diff** — metrics hide truncation, repetition and dropped
-   entities.
+6. **Evaluate and diff qualitatively** — metrics hide truncation, repetition and
+   dropped entities.
 
 ---
 
-## Challenges
+## Notes on the checkpoint and environment
 
-**Local hardware was unusable for this.** The development machine has a 4GB
-RTX 3050 with a CPU-only torch build on Python 3.13. 200M parameters under Adam
-needs ~3.2GB before activations, and `IndicTransToolkit` has a C build step that
-wants Python ≤3.12. Rather than spend hours on a CUDA reinstall and wheel
-compatibility, the repo is authored locally and trained on Colab/Kaggle (Python
-3.11, CUDA preinstalled, 16GB). `src/modeling.py` detects the device and dtype
-at runtime so the same code runs in both places.
+**The KV cache cannot be enabled.** The published IndicTrans2 remote modeling
+code targets the pre-4.43 transformers API, where `generate()` passed
+`past_key_values=None` on the first decoding step. Under transformers 4.56 an
+empty `EncoderDecoderCache` is passed instead, and
 
-`<!-- Add the ones you actually hit. Strong candidates:
-  - transformers version vs. the Hub's remote code
-  - IndicProcessor API drift (is_target)
-  - IN22-Gen config naming on the Hub
-  - OOM / throughput tuning
-  - anything the smoke test caught
--->`
+```python
+past_key_values[0][0].shape[2] if past_key_values is not None else 0
+```
+
+takes the wrong branch and raises on `NoneType.shape`. Community forks of the
+checkpoint behave identically.
+
+Cost is modest and measured rather than assumed — `scripts/check_kv_cache.py`
+reports **0.77s for 4 sentences at beam 5**, ~0.19 s/sentence, so a 500-sentence
+benchmark decodes in ~95s. Training is unaffected: teacher forcing is a single
+parallel pass and never decodes step by step.
+
+**The model does not derive `decoder_input_ids` from labels.** Most HF seq2seq
+models shift labels right inside `forward`, or expose
+`prepare_decoder_input_ids_from_labels` for `DataCollatorForSeq2Seq` to call.
+This one does neither, so training fails with
+`ValueError: You have to specify either decoder_input_ids or decoder_inputs_embeds`
+while inference works fine (`generate()` builds them itself).
+`DataCollatorWithDecoderInputs` in `src/train.py` performs the standard
+fairseq/BART shift, mapping `-100` label padding back to real pad ids so it
+never reaches the embedding lookup.
+
+**Evaluation during training is disabled** (`eval_during_training: false`, which
+also passes `eval_dataset=None`). With the cache off, a generation-based eval
+pass over 1,000 samples costs roughly as much as the entire training run, and the
+validation split is drawn from the same mined corpus as the training data.
+
+**PEFT and torchao conflict on Colab.** PEFT's LoRA dispatcher probes for
+optional quantization backends and raises on torchao below 0.16 rather than
+treating it as unavailable; Colab preinstalls 0.10. `pip uninstall -y torchao`
+resolves it, and `src/modeling.py` converts the error into that advice.
+
+**Benchmark loading is defensive.** IN22-Gen has been repackaged as parquet, so
+the per-pair config names on its card may not resolve, and its split is `gen`
+rather than `test`. FLORES is gated and cannot serve as a silent fallback. The
+loader tries a list of candidate shapes and reports which succeeded.
 
 ---
 
-## What I'd do with more time
+## Possible extensions
 
-- **Full BPCC** rather than a 120k Samanantar subset, with quality-based
-  filtering (LaBSE cosine) instead of only structural heuristics.
-- **Document-level training** on BPCC-doc, to actually exercise what these
-  rotary checkpoints were built for.
+- **A corpus outside BPCC** — Bhili, or a Marathi domain the base model handles
+  poorly. The flat loss curve above is a direct consequence of this choice, and
+  it is the single change that would most alter the outcome.
+- **Full BPCC** rather than a 121k subset, with quality-based filtering (LaBSE
+  cosine) in addition to the structural heuristics here.
 - **LoRA vs. full fine-tuning** as a controlled comparison at equal step count.
-- **Human evaluation** on a sample. chrF++ is a proxy, and for a
-  morphologically rich target a cheap proxy.
-- **Domain-targeted evaluation** — split IN22-Gen by domain to see where the
-  fine-tune helps and where it regresses, rather than reporting one aggregate.
-
----
-
-## Artifacts
-
-Checkpoints, logs and outputs: `<!-- Google Drive link -->`
+- **Human evaluation** on a sample; chrF++ is a cheap proxy for a
+  morphologically rich target.
+- **Per-domain breakdown** of IN22-Gen, to see where the fine-tune helps and
+  where it regresses, rather than one aggregate.

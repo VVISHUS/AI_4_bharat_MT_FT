@@ -2,19 +2,19 @@
 
 Usage
 -----
-    python -m src.evaluate --checkpoint outputs/rotary-it2-en-mr/final
+    python -m src.evaluate --checkpoint outputs/indictrans2-en-mr/final
     python -m src.evaluate --checkpoint ... --base-only    # baseline first
 
 Design notes
 ------------
-* The benchmark is IN22-Gen (AI4Bharat's own), not the Samanantar validation
-  split. Evaluating on held-out rows of a mined corpus measures how well we fit
-  the miner's noise, which is not the question being asked.
-* chrF++ is the headline metric. BLEU on a morphologically rich target with a
-  single reference is noisy and rewards the wrong things; we report it because
-  it is expected, not because it is informative here.
-* Base and fine-tuned are decoded with identical generation settings so the
-  comparison is about weights, not sampling.
+* The headline benchmark is IN22-Gen, not the Samanantar validation split:
+  held-out rows of a mined corpus measure how well the miner's noise was fitted.
+  `--in-domain` scores that split too, since the gap between the two is
+  informative.
+* chrF++ is the primary metric. BLEU on a morphologically rich target with a
+  single reference is noisy; it is reported because it is expected.
+* Base and fine-tuned decode with identical generation settings, so the
+  comparison isolates the weights.
 """
 
 from __future__ import annotations
@@ -38,12 +38,10 @@ LOGGER = logging.getLogger("evaluate")
 def load_benchmark(eval_cfg: dict, src_lang: str, tgt_lang: str):
     """Load the first benchmark candidate that works.
 
-    Hub packaging for these benchmarks drifts. IN22-Gen has been repackaged as
-    parquet, so the per-pair config names on its card ("eng_Latn-mar_Deva") may
-    no longer exist and its split is "gen" rather than "test". FLORES is gated
-    and so cannot serve as a silent fallback. Rather than hardcode one shape and
-    discover the mistake at evaluation time, try the plausible ones and say
-    which worked.
+    Hub packaging drifts: IN22-Gen has been repackaged as parquet, so the
+    per-pair config names on its card may no longer resolve, and its split is
+    "gen" rather than "test". FLORES is gated and cannot serve as a silent
+    fallback. Try the plausible shapes and report which one worked.
     """
     candidates = eval_cfg.get("candidates")
     if not candidates:  # legacy config shape
@@ -81,20 +79,33 @@ def load_benchmark(eval_cfg: dict, src_lang: str, tgt_lang: str):
     )
 
 
-def load_in_domain_split(cfg: dict):
+def load_in_domain_split(cfg: dict, run_dir=None):
     """Rebuild the held-out Samanantar validation split used during training.
 
     Deterministic: the same filters over the same stream, shuffled with the same
     seed, yield the same rows the training run held out.
 
-    Scoring this *alongside* the out-of-domain benchmark is the point. The gap
-    between them is the evidence: a fine-tune that improves in-domain while
-    flat or worse out-of-domain has learned the mined corpus's quirks rather
-    than better Marathi.
+    Scored alongside the out-of-domain benchmark: the gap between them is the
+    evidence. A fine-tune that improves in-domain while staying flat or
+    regressing out-of-domain has learned the mined corpus's quirks rather than
+    better Marathi.
     """
     from datasets import Dataset
 
     from src.data import load_samanantar_pairs
+
+    # Prefer the split saved by the training run: it is the exact set of rows
+    # that run held out, with no dependency on the corpus streaming the same way.
+    if run_dir is not None:
+        saved = Path(run_dir) / "valid_split.jsonl"
+        if saved.exists():
+            dataset = Dataset.from_json(str(saved))
+            LOGGER.info("In-domain split: %d pairs from %s", len(dataset), saved)
+            return dataset, "samanantar-mr (held-out, in-domain)"
+        LOGGER.warning(
+            "%s not found -- reconstructing the split from the corpus. This "
+            "matches only if the data config and corpus are unchanged.", saved
+        )
 
     data_cfg = cfg["data"]
     pairs, _ = load_samanantar_pairs(data_cfg)
@@ -103,6 +114,38 @@ def load_in_domain_split(cfg: dict):
     valid = dataset.select(range(n_valid))
     LOGGER.info("In-domain split: %d held-out Samanantar pairs", len(valid))
     return valid, "samanantar-mr (held-out, in-domain)"
+
+
+def resolve_checkpoint(path: str) -> Path:
+    """Validate a local checkpoint directory before handing it to transformers.
+
+    `from_pretrained` treats anything that is not an existing directory as a Hub
+    repo id, so a wrong path surfaces as an opaque `HFValidationError` about repo
+    naming rather than "that directory does not exist". Check here instead, and
+    say what is actually wrong.
+    """
+    checkpoint = Path(path)
+    if not checkpoint.exists():
+        hint = ""
+        parent = checkpoint.parent
+        if parent.exists():
+            siblings = sorted(p.name for p in parent.iterdir() if p.is_dir())
+            hint = f"\n{parent} contains: {siblings or '(no subdirectories)'}"
+        raise SystemExit(f"Checkpoint not found: {checkpoint}{hint}")
+
+    if not checkpoint.is_dir():
+        raise SystemExit(f"Checkpoint must be a directory, not a file: {checkpoint}")
+
+    markers = ["adapter_config.json", "config.json", "model.safetensors", "pytorch_model.bin"]
+    if not any((checkpoint / m).exists() for m in markers):
+        present = sorted(p.name for p in checkpoint.iterdir())
+        raise SystemExit(
+            f"{checkpoint} holds no model: expected one of {markers}.\n"
+            f"Found: {present}\n"
+            "If a directory was renamed onto an existing one, the run may have "
+            "ended up nested a level deeper than expected."
+        )
+    return checkpoint
 
 
 def resolve_columns(dataset, src_lang: str, tgt_lang: str) -> tuple[str, str]:
@@ -148,10 +191,9 @@ def translate(
             **batch,
             num_beams=num_beams,
             max_length=max_length,
-            # Greedy-ish length control: MT wants no repetition penalty games,
-            # just beams. Keep this identical between base and tuned.
+            # No repetition penalties -- beams only, identical for base and tuned.
             early_stopping=True,
-            # Required for this checkpoint -- see modeling.disable_kv_cache().
+            # See modeling.disable_kv_cache().
             use_cache=False,
         )
         decoded = decode_targets(tokenizer, generated, strategy)
@@ -214,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     LOGGER.info("device=%s dtype=%s label_strategy=%s", device, dtype, strategy)
 
     if args.in_domain:
-        dataset, bench_name = load_in_domain_split(cfg)
+        run_dir = args.checkpoint and Path(args.checkpoint).parent
+        dataset, bench_name = load_in_domain_split(cfg, run_dir)
         src_col, tgt_col = "src", "tgt"
     else:
         dataset, bench_name = load_benchmark(ecfg, src_lang, tgt_lang)
@@ -249,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         del base_model
         torch.cuda.empty_cache()
 
-        checkpoint = Path(args.checkpoint)
+        checkpoint = resolve_checkpoint(args.checkpoint)
         if (checkpoint / "adapter_config.json").exists():
             # LoRA run: reload the base, then apply the adapter on top.
             from peft import PeftModel
